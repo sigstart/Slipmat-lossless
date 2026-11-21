@@ -12,9 +12,12 @@
 //! perfectly fine.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
+use anyhow::{Context, Result, anyhow};
 use slipmat_core::ipc::{Event, Request};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
 /// Sends requests. Cheap to clone; the writer task owns the socket.
@@ -42,23 +45,51 @@ pub enum Incoming {
     Lost(String),
 }
 
-/// Where `slipmatd` is: beside this binary, which is true of an install and of
-/// `cargo build` alike.
+/// Prefer the matching daemon from the same build directory or install.
 fn daemon_path() -> PathBuf {
     std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|dir| dir.join("slipmatd")))
+        .filter(|path| path.is_file())
         .unwrap_or_else(|| PathBuf::from("slipmatd"))
 }
 
-/// Connect — starting a daemon if none is listening — and stream its events.
-pub async fn connect() -> anyhow::Result<(Link, mpsc::UnboundedReceiver<Incoming>)> {
-    // Blocking, and it may start a process: off the async thread.
-    let stream =
-        tokio::task::spawn_blocking(|| slipmat_core::ipc::connect_or_spawn(&daemon_path()))
-            .await??;
+async fn connect_daemon() -> Result<UnixStream> {
+    let stream = tokio::task::spawn_blocking(|| {
+        let path = daemon_path();
+        slipmat_core::ipc::connect_or_spawn(&path)
+            .with_context(|| format!("Could not connect to or start {}.", path.display()))
+    })
+    .await??;
     stream.set_nonblocking(true)?;
-    let (read, mut write) = tokio::net::UnixStream::from_std(stream)?.into_split();
+    Ok(UnixStream::from_std(stream)?)
+}
+
+/// The main socket is bound before native auth. Wait for a reply so a
+/// cold-starting sign-in only retries after the auth endpoint is ready.
+pub async fn wait_for_daemon() -> Result<()> {
+    let mut stream = connect_daemon().await?;
+    let mut request = serde_json::to_vec(&Request::Stage)?;
+    request.push(b'\n');
+    tokio::time::timeout(Duration::from_secs(5), async {
+        stream.write_all(&request).await?;
+        let line = BufReader::new(stream)
+            .lines()
+            .next_line()
+            .await?
+            .context("slipmatd closed the connection during startup")?;
+        match serde_json::from_str::<Event>(&line)? {
+            Event::Stage(_) => Ok(()),
+            _ => Err(anyhow!("slipmatd did not return its startup stage")),
+        }
+    })
+    .await
+    .context("Timed out waiting for slipmatd to initialize")?
+}
+
+/// Connect — starting a daemon if none is listening — and stream its events.
+pub async fn connect() -> Result<(Link, mpsc::UnboundedReceiver<Incoming>)> {
+    let (read, mut write) = connect_daemon().await?.into_split();
 
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Request>();
     tokio::spawn(async move {

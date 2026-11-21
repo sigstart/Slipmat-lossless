@@ -114,7 +114,6 @@ struct App {
     message: Option<Notice>,
     refreshing_library: bool,
     /// Set by `q`. `_` leaves without it, and the daemon keeps playing.
-    quit_daemon: bool,
     /// The visualiser's last frame. All zeroes when there is nothing to hear,
     /// or when there was no audio server to listen to in the first place.
     bars: [f32; spectrum::BANDS],
@@ -133,7 +132,6 @@ impl Default for App {
             pane: Pane::default(),
             message: None,
             refreshing_library: false,
-            quit_daemon: false,
             // `#[derive(Default)]` stops at arrays of 32.
             bars: [0.0; spectrum::BANDS],
         }
@@ -295,16 +293,6 @@ async fn run() -> Result<()> {
     }
 
     ratatui::restore();
-    if app.quit_daemon {
-        // **Asked for, then waited on.** The daemon saves the session before it
-        // goes, and leaving the moment the request is written would close the
-        // socket underneath it. It answers by dying, so the wait ends when the
-        // link is lost — or by refusing, when another window is still open.
-        link.send(Request::Quit);
-        if let Some(refusal) = wait_for_quit(&mut events).await {
-            eprintln!("climat: {refusal}");
-        }
-    }
     Ok(())
 }
 
@@ -458,13 +446,7 @@ fn on_key(key: KeyEvent, link: &link::Link, app: &mut App) -> bool {
             index: app.queue.cursor,
         }),
 
-        // Leaves the daemon alone, the way Ctrl+C above does: the music keeps
-        // playing and a GTK window or another terminal still has a player to
-        // attach to. `q` is the one that takes the player with it.
-        KeyCode::Char('q') => {
-            app.quit_daemon = true;
-            return false;
-        }
+        KeyCode::Char('q') => return false,
         _ => {}
     }
     true
@@ -880,30 +862,6 @@ impl App {
             // The daemon refuses things — removing the track it is playing is
             // the one that will be hit most. Saying so is rule 4's job.
             Event::Error { detail } => self.message = Some(Notice::bad(detail)),
-        }
-    }
-}
-
-/// Wait for the daemon to act on [`Request::Quit`], and report a refusal.
-///
-/// Returns `None` when it went away, which is the request being honoured.
-async fn wait_for_quit(
-    events: &mut tokio::sync::mpsc::UnboundedReceiver<link::Incoming>,
-) -> Option<String> {
-    let deadline = tokio::time::sleep(std::time::Duration::from_secs(5));
-    tokio::pin!(deadline);
-    loop {
-        tokio::select! {
-            message = events.recv() => match message {
-                Some(link::Incoming::Event(event)) => {
-                    if let Event::Error { detail } = *event {
-                        return Some(detail);
-                    }
-                }
-                // The socket closed: the daemon is gone, which is what was asked.
-                Some(link::Incoming::Lost(_)) | None => return None,
-            },
-            _ = &mut deadline => return Some("the daemon did not answer".into()),
         }
     }
 }

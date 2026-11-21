@@ -69,16 +69,18 @@ pub async fn run(command: Command) -> Result<()> {
 }
 
 async fn exchange(command: Command) -> Result<()> {
-    let mut client = Client::connect()
-        .await
-        .map_err(|error| match error.kind() {
-            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {
-                anyhow!(
-                    "Native authentication is unavailable. The local auth endpoint is not running."
-                )
-            }
-            _ => anyhow!("Could not connect to the native authentication endpoint."),
-        })?;
+    let mut connection = Client::connect().await;
+    if matches!(command, Command::SignIn) && connection.as_ref().is_err_and(endpoint_missing) {
+        crate::link::wait_for_daemon().await?;
+        connection = Client::connect().await;
+    }
+    let mut client = connection.map_err(|error| {
+        if endpoint_missing(&error) {
+            anyhow!("Native authentication is unavailable. The local auth endpoint is not running.")
+        } else {
+            anyhow!("Could not connect to the native authentication endpoint.")
+        }
+    })?;
     let reply = match command {
         Command::SignIn => sign_in(&mut client).await?,
         Command::SignOut => auth_reply(client.sign_out().await)?,
@@ -168,6 +170,13 @@ async fn play_track(client: &mut Client, track_id: String) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn endpoint_missing(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+    )
 }
 
 async fn sign_in(client: &mut Client) -> Result<Reply> {

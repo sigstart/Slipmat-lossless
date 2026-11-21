@@ -325,13 +325,13 @@ fn ends(left: Vec<Span<'static>>, right: Vec<Span<'static>>, width: usize) -> Ve
 /// It changes with focus, because the keys do: only the queue reorders, only
 /// the browser filters. And it is built by priority and stops when the window
 /// runs out, so a narrow terminal loses the least useful hint rather than
-/// losing the row. Leaving and quitting are reserved from the start — a player
-/// you cannot see how to leave is worse than one with no hints at all.
+/// losing the row. The quit hint stays visible even when space runs out.
 fn key_hints(width: usize, pane: Pane, typing: bool, catalog: bool) -> Line<'static> {
-    // **What the terminal already means.** Ctrl+C is how everybody leaves a
-    // program in a terminal, and it is the right key for the one that leaves
-    // the music playing. `q` is the one that takes the player with it.
-    const LEAVING: [(&str, &str); 2] = [("Ctrl+C", "hide"), ("q", "quit")];
+    let quit = if typing {
+        ("Ctrl+C", "quit")
+    } else {
+        ("q", "quit")
+    };
 
     // While typing, every letter goes into the filter, so advertising the
     // transport keys would be a lie about what the keyboard does.
@@ -375,12 +375,12 @@ fn key_hints(width: usize, pane: Pane, typing: bool, catalog: bool) -> Line<'sta
 
     // Two cells of padding inside the cap, one gap after the label.
     let cost = |(key, what): &(&str, &str)| key.chars().count() + what.chars().count() + 6;
-    let reserved: usize = LEAVING.iter().map(cost).sum();
+    let reserved = cost(&quit);
 
     let mut spans = Vec::new();
     let mut used = 0;
-    for pair in keys.iter().copied().chain(LEAVING) {
-        let optional = !LEAVING.contains(&pair);
+    for pair in keys.into_iter().chain([quit]) {
+        let optional = pair != quit;
         if optional {
             if used + cost(&pair) + reserved > width {
                 continue;

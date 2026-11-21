@@ -34,7 +34,7 @@ and a window open at once are two views of one player rather than two players.
     Addicted To a Memory (feat. Bahari)     Zedd — True Colors
     Aftershock (feat. Jacquie Lee)          Cash Cash — Blood, Sweat & 3 Years
 
-  [space] play/pause   [↑↓] move   [↵] play/open   [⇥] tabs   [/] filter   [Ctrl+C] hide   [q] quit
+  [space] play/pause   [↑↓] move   [↵] play/open   [⇥] tabs   [/] filter   [q] quit
 ```
 
 ## First run
@@ -143,8 +143,7 @@ tenth of a second and gets the original palette.
 | `l` | Queue it at the end |
 | `d` | Remove it from the queue |
 | `i` `k` | Move it up / down in the queue |
-| `Ctrl+C` | Hide — leave, and let the music keep playing |
-| `q` | Quit — stop the daemon and the music with it |
+| `q`, `Ctrl+C` | Close CLImat and keep playback running. Use `Ctrl+C` while typing in a filter. |
 
 A `▸` marks a row that opens a page rather than playing. A rule runs to the far end of the strip, carrying whatever
 that tab has to say about itself — the order on a library section, the number of
@@ -187,8 +186,7 @@ Each key is bracketed, so it reads as something to press rather than as the
 first word of its own label. The bottom
 row changes with which pane has focus — only the queue reorders,
 only the library filters — and shows the keys that fit, dropping the least essential first —
-so a narrow window loses the reorder hints rather than losing the row. Leaving
-and quitting are always on it.
+so a narrow window loses the reorder hints first. The quit hint stays visible.
 
 **One pane, six tabs.** The queue is somewhere you go rather than something
 always on screen — a permanently visible queue costs rows every moment nobody
@@ -201,17 +199,13 @@ when the daemon echoes, which is what keeps a terminal and a GTK window from
 disagreeing about what is playing. The cursor is the exception: it is where
 *this* terminal is looking, so it moves the instant you press a key.
 
-`Ctrl+C` and `q` are the whole difference between closing the window and
-closing the player. Ctrl+C is what a terminal already means, and it is the right
-key for the one that leaves the music playing; `q` is the one that takes the
-player with it, and it is refused while another Slipmat client is open, because
-quitting would take the player from a window somebody else is looking at.
-
 ## Running it
 
 ```
+cargo build -p slipmatd
 cargo run -p climat
 ```
 
-The daemon starts itself on the first connection, so there is nothing to enable
-and no service to install.
+CLImat starts the daemon on the first connection, including when you run
+`climat sign-in` before opening the player. It looks for `slipmatd` beside the
+CLImat binary and then on `PATH`.
