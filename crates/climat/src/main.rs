@@ -15,6 +15,7 @@
 mod auth;
 mod browser;
 mod link;
+mod navigation;
 mod queue;
 mod spectrum;
 mod theme;
@@ -32,7 +33,9 @@ use slipmat_core::ipc::{
 use slipmat_core::player::protocol::RepeatMode;
 
 use crate::browser::{SECTIONS, Showing};
+use crate::navigation::{Navigation, Page, RowId, Selection};
 use crate::ui::Pane;
+use tokio::signal::unix::{SignalKind, signal};
 
 /// How often to redraw while playing.
 ///
@@ -107,6 +110,8 @@ struct App {
     native_playback: bool,
     capabilities: PlaybackCapabilities,
     browser: browser::Browser,
+    startup_navigation: Option<Navigation>,
+    saved_selection: Option<Selection>,
     queue: queue::Queue,
     pane: Pane,
     /// The last thing worth saying, and when — so it fades rather than sitting
@@ -128,6 +133,8 @@ impl Default for App {
             native_playback: false,
             capabilities: PlaybackCapabilities::default(),
             browser: browser::Browser::default(),
+            startup_navigation: None,
+            saved_selection: None,
             queue: queue::Queue::default(),
             pane: Pane::default(),
             message: None,
@@ -158,6 +165,8 @@ fn main() -> Result<()> {
 
 async fn run() -> Result<()> {
     let (link, mut events) = link::connect().await?;
+    let mut hangup = signal(SignalKind::hangup())?;
+    let mut terminate = signal(SignalKind::terminate())?;
 
     // `init` takes the terminal (raw mode, alternate screen) and installs a
     // panic hook that gives it back. The teardown in `main` covers the one case
@@ -169,11 +178,17 @@ async fn run() -> Result<()> {
     // stdin itself, or the answer is delivered as a keystroke.
     theme::detect();
 
-    let mut app = App::default();
-    // The library is what the pane opens on, so ask for it with everything else
-    // rather than waiting for a key. It comes from the daemon's cache, so this
-    // is a local socket round trip and not a request to Apple.
-    app.browse(&link);
+    let mut app = App {
+        startup_navigation: Navigation::load(),
+        ..App::default()
+    };
+    match app.startup_navigation.take() {
+        Some(saved) if saved.page.is_none() && !saved.catalog => {
+            app.restore_navigation(saved, &link);
+        }
+        Some(saved) => app.startup_navigation = Some(saved),
+        None => app.browse(&link),
+    }
     // Decoration: if there is no audio server to listen to, the bars simply
     // never appear and everything else works exactly as before.
     let mut spectrum = spectrum::start();
@@ -224,8 +239,10 @@ async fn run() -> Result<()> {
             // Keys first: a busy event stream must never starve the one thing
             // a person is waiting on.
             biased;
-            Some(Ok(term_event)) = keys.next() => match term_event {
-                TermEvent::Key(key) if key.kind == KeyEventKind::Press => {
+            _ = hangup.recv() => break,
+            _ = terminate.recv() => break,
+            term_event = keys.next() => match term_event {
+                Some(Ok(TermEvent::Key(key))) if key.kind == KeyEventKind::Press => {
                     if !on_key(key, &link, &mut app) {
                         break;
                     }
@@ -239,7 +256,8 @@ async fn run() -> Result<()> {
                 }
                 // A resize invalidates the whole buffer, so it has to redraw
                 // even though nothing about the music changed.
-                TermEvent::Resize(..) => dirty = true,
+                Some(Ok(TermEvent::Resize(..))) => dirty = true,
+                None | Some(Err(_)) => break,
                 _ => {}
             },
             Some(message) = events.recv() => match message {
@@ -250,7 +268,7 @@ async fn run() -> Result<()> {
                 link::Incoming::Lost(why) => {
                     ratatui::restore();
                     eprintln!("climat: lost the daemon — {why}");
-                    return Ok(());
+                    break;
                 }
             },
             // `spectrum.as_mut()` so a missing visualiser is a branch that
@@ -293,6 +311,12 @@ async fn run() -> Result<()> {
     }
 
     ratatui::restore();
+    if app.startup_navigation.is_none()
+        && app.stage != Stage::SignedOut
+        && let Err(error) = app.navigation().save()
+    {
+        eprintln!("climat: could not save browsing position: {error}");
+    }
     Ok(())
 }
 
@@ -474,7 +498,7 @@ fn typing(code: KeyCode, link: &link::Link, app: &mut App) {
                 app.browser.forget_found();
             } else {
                 app.browser.reset();
-                app.browse(link);
+                app.apply_filter(link);
             }
             return;
         }
@@ -491,11 +515,94 @@ fn typing(code: KeyCode, link: &link::Link, app: &mut App) {
     }
     if !app.browser.showing.is_catalog() {
         app.browser.reset();
-        app.browse(link);
+        app.apply_filter(link);
     }
 }
 
 impl App {
+    fn navigation(&mut self) -> Navigation {
+        let page = match &self.browser.showing {
+            Showing::Page { page, .. } => Some(page.clone()),
+            _ => None,
+        };
+        Navigation {
+            view: self.browser.view,
+            catalog: self.browser.showing.is_catalog()
+                || (page.is_some() && self.browser.from_catalog),
+            page,
+            filters: self.browser.filters.clone(),
+            sorts: self.browser.sorts,
+            kinds: self.browser.kinds,
+            selection: self.saved_selection.take().unwrap_or_else(|| Selection {
+                index: self.browser.cursor,
+                id: self.browser.selected().and_then(RowId::of),
+            }),
+        }
+    }
+
+    fn restore_navigation(&mut self, saved: Navigation, link: &link::Link) {
+        self.browser.view = saved.view;
+        self.browser.filters = saved.filters;
+        self.browser.sorts = saved.sorts;
+        self.browser.kinds = saved.kinds;
+        if let Some(page) = saved.page {
+            self.open_page(page, saved.catalog, link);
+        } else if saved.catalog {
+            self.show_catalog();
+            self.search(link);
+        } else {
+            self.browse(link);
+        }
+        self.saved_selection = Some(saved.selection);
+    }
+
+    fn restore_selection(&mut self) {
+        if let Some(selection) = self.saved_selection.take() {
+            self.browser.cursor = selection.locate(&self.browser.rows);
+        }
+    }
+
+    fn apply_filter(&mut self, link: &link::Link) {
+        self.saved_selection = None;
+        if matches!(self.browser.showing, Showing::Page { .. }) {
+            self.filter_page();
+        } else {
+            self.browse(link);
+        }
+    }
+
+    fn filter_page(&mut self) {
+        let query = self.browser.filter().trim().to_lowercase();
+        let entries = self
+            .browser
+            .page_rows
+            .iter()
+            .filter(|entry| {
+                query.is_empty()
+                    || entry.title().to_lowercase().contains(&query)
+                    || entry.subtitle().to_lowercase().contains(&query)
+            })
+            .cloned()
+            .collect();
+        self.browser.replace(entries, 0);
+    }
+
+    fn open_page(&mut self, page: Page, from_catalog: bool, link: &link::Link) {
+        self.saved_selection = None;
+        link.send(Request::Open {
+            kind: page.kind,
+            id: page.id.clone(),
+        });
+        self.browser.showing = Showing::Page {
+            page,
+            loading: true,
+        };
+        self.browser.from_catalog = from_catalog;
+        self.browser.page_rows.clear();
+        self.browser.replace(Vec::new(), 0);
+        self.browser.reset();
+    }
+
     /// Ask for whatever the browser is currently meant to be showing.
     fn browse(&self, link: &link::Link) {
         let (sort, reverse) = self.browser.sort();
@@ -512,6 +619,7 @@ impl App {
     }
 
     fn show_library(&mut self, view: LibraryView, link: &link::Link) {
+        self.saved_selection = None;
         self.browser.view = view;
         self.browser.showing = Showing::Library;
         self.browser.reset();
@@ -525,6 +633,7 @@ impl App {
     /// a question Apple has already answered; clearing it on the way past would
     /// mean paying for the same search again on the way back.
     fn show_catalog(&mut self) {
+        self.saved_selection = None;
         self.browser.showing = browser::Showing::Catalog { searching: false };
         // **Its own results, not whatever was showing.** Every other tab leaves
         // `rows` holding a library section or an album's tracks, and without
@@ -534,6 +643,7 @@ impl App {
     }
 
     fn search(&mut self, link: &link::Link) {
+        self.saved_selection = None;
         let query = self.browser.filter().trim().to_owned();
         if query.is_empty() {
             self.browser.forget_found();
@@ -569,7 +679,10 @@ impl App {
 
     fn pane_cursor(&mut self, delta: isize) {
         match self.pane {
-            Pane::Browser => self.browser.move_cursor(delta),
+            Pane::Browser => {
+                self.saved_selection = None;
+                self.browser.move_cursor(delta);
+            }
             Pane::Queue => self.queue.move_cursor(delta),
         }
     }
@@ -630,17 +743,15 @@ impl App {
             return;
         };
         if let Some((kind, id)) = entry.page_target() {
-            // Named before the daemon answers, so an album that takes a moment
-            // to arrive shows whose it is rather than going blank.
-            self.browser.showing = Showing::Page {
+            let page = Page {
+                kind,
+                id,
                 title: entry.title().to_owned(),
                 subtitle: entry.subtitle(),
-                loading: true,
             };
-            self.browser.from_catalog = came_from_catalog;
-            self.browser.rows.clear();
-            self.browser.reset();
-            return link.send(Request::Open { kind, id });
+            self.open_page(page, came_from_catalog, link);
+            self.browser.filter_mut().clear();
+            return;
         }
         // A song: the queue is the whole list it sits in, opened at this row.
         let (ids, index) = self.browser.queue_from_here();
@@ -695,9 +806,10 @@ impl App {
             // used to ask Apple the same question a second time.
             if self.browser.from_catalog {
                 self.browser.from_catalog = false;
-                self.browser.showing = browser::Showing::Catalog { searching: false };
-                self.browser.restore_found();
-                self.browser.reset();
+                self.show_catalog();
+                if self.browser.found.is_empty() {
+                    self.search(link);
+                }
                 return;
             }
             let view = self.browser.view;
@@ -757,6 +869,7 @@ fn seek(link: &link::Link, app: &App, delta: i64) {
 
 impl App {
     fn clear_account_state(&mut self) {
+        self.saved_selection = None;
         self.browser.clear_account_state();
         self.message = None;
         self.refreshing_library = false;
@@ -801,12 +914,24 @@ impl App {
                     self.clear_account_state();
                 }
                 self.stage = stage;
+                if self.stage == Stage::Ready
+                    && let Some(saved) = self.startup_navigation.take()
+                {
+                    self.restore_navigation(saved, link);
+                }
             }
-            Event::Rows { entries, total, .. } => {
+            Event::Rows {
+                view,
+                entries,
+                total,
+            } => {
                 // Ignored while the catalog is showing: a stale library answer
                 // must not overwrite the results somebody asked Apple for.
-                if !self.browser.showing.is_catalog() {
+                if matches!(self.browser.showing, Showing::Library) && view == self.browser.view {
                     self.browser.replace(entries, total);
+                    if !self.browser.rows.is_empty() {
+                        self.restore_selection();
+                    }
                 }
             }
             Event::Results {
@@ -836,17 +961,35 @@ impl App {
                     // there and the cursor stays where somebody left it.
                     self.browser.extend(entries, showing);
                 }
+                if showing && let Some(selection) = &self.saved_selection {
+                    if more
+                        && !self.browser.rows.is_empty()
+                        && selection.index >= self.browser.rows.len()
+                    {
+                        self.page(link);
+                    } else {
+                        self.restore_selection();
+                    }
+                }
             }
             Event::Page {
-                header, entries, ..
+                kind,
+                id,
+                header,
+                entries,
             } => {
-                self.browser.showing = Showing::Page {
-                    title: header.title().to_owned(),
-                    subtitle: header.subtitle(),
-                    loading: false,
+                let Showing::Page { page, loading } = &mut self.browser.showing else {
+                    return;
                 };
-                self.browser.replace(entries, 0);
-                self.browser.reset();
+                if !*loading || page.kind != kind || page.id != id {
+                    return;
+                }
+                page.title = header.title().to_owned();
+                page.subtitle = header.subtitle();
+                *loading = false;
+                self.browser.page_rows = entries;
+                self.filter_page();
+                self.restore_selection();
             }
             Event::LibraryChanged => {
                 self.message = None;
@@ -861,7 +1004,12 @@ impl App {
             }
             // The daemon refuses things — removing the track it is playing is
             // the one that will be hit most. Saying so is rule 4's job.
-            Event::Error { detail } => self.message = Some(Notice::bad(detail)),
+            Event::Error { detail } => {
+                if matches!(self.browser.showing, Showing::Page { loading: true, .. }) {
+                    self.back(link);
+                }
+                self.message = Some(Notice::bad(detail));
+            }
         }
     }
 }
@@ -869,6 +1017,65 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reopening_a_filtered_playlist_restores_the_selected_row_after_reordering() {
+        use slipmat_core::entry::Entry;
+        use slipmat_core::ipc::PageKind;
+        use slipmat_core::music::types::Playlist;
+
+        let row = |id: &str, name: &str| {
+            Entry::Playlist(Playlist {
+                id: id.into(),
+                name: name.into(),
+                date_added: String::new(),
+                last_modified: String::new(),
+                curator: String::new(),
+                description: String::new(),
+                artwork: None,
+                library: true,
+            })
+        };
+        let header = row("playlist", "The playlist");
+        let first = row("first", "Live first");
+        let selected = row("selected", "Live second");
+        let page_reply = |entries| Event::Page {
+            kind: PageKind::LibraryPlaylist,
+            id: "playlist".into(),
+            header: header.clone(),
+            entries,
+        };
+        let (link, mut requests) = link::Link::channel();
+        let mut app = App::default();
+        app.browser.view = LibraryView::Playlists;
+        app.browser.replace(vec![header.clone()], 1);
+        app.activate(&link);
+        requests.try_recv().unwrap();
+        app.on_event(page_reply(vec![first.clone(), selected.clone()]), &link);
+        *app.browser.filter_mut() = "live".into();
+        app.apply_filter(&link);
+        app.browser.cursor = 1;
+
+        let saved = serde_json::to_vec(&app.navigation()).unwrap();
+        let mut reopened = App {
+            startup_navigation: Some(serde_json::from_slice(&saved).unwrap()),
+            ..App::default()
+        };
+        reopened.on_event(Event::Stage(Stage::Ready), &link);
+        assert!(matches!(requests.try_recv().unwrap(),
+            Request::Open { kind: PageKind::LibraryPlaylist, id } if id == "playlist"
+        ));
+        reopened.on_event(
+            page_reply(vec![row("excluded", "Studio recording"), selected, first]),
+            &link,
+        );
+
+        assert_eq!(reopened.browser.view, LibraryView::Playlists);
+        assert_eq!(reopened.browser.filter(), "live");
+        assert_eq!(reopened.browser.rows.len(), 2);
+        assert_eq!(reopened.browser.cursor, 0);
+        assert_eq!(reopened.browser.selected().unwrap().title(), "Live second");
+    }
 
     #[test]
     fn signed_out_enter_requests_sign_in_before_typing_consumes_it() {

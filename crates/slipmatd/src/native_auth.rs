@@ -61,8 +61,13 @@ impl Endpoint {
             device: metadata.dev(),
         };
         fs::set_permissions(&socket.path, Permissions::from_mode(0o600))?;
+        let storage = SessionStorage::for_provider(&provider, &socket.path);
+        if let Some(storage) = &storage {
+            storage.remove_runtime();
+        }
         let service = Rc::new(Service {
             provider,
+            storage,
             session: RefCell::new(Session::SignedOut),
             attempt_timeout: ATTEMPT_TIMEOUT,
         });
@@ -97,6 +102,9 @@ pub async fn run(provider: PathBuf) -> anyhow::Result<()> {
 impl Drop for Endpoint {
     fn drop(&mut self) {
         self.task.abort();
+        if let Some(storage) = &self.service.storage {
+            storage.remove_runtime();
+        }
     }
 }
 
@@ -145,6 +153,15 @@ async fn bind_listener(path: &Path) -> io::Result<UnixListener> {
 async fn serve(listener: UnixListener, service: Rc<Service>) {
     let connections = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
     let mut clients = JoinSet::new();
+    if service
+        .storage
+        .as_ref()
+        .is_some_and(|storage| storage.archive.is_file())
+    {
+        service.session.replace(Session::Busy);
+        let restoring = service.clone();
+        clients.spawn_local(async move { restoring.restore().await });
+    }
     let mut reap = tokio::time::interval(Duration::from_secs(1));
     reap.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -172,8 +189,39 @@ async fn serve(listener: UnixListener, service: Rc<Service>) {
     }
 }
 
+struct SessionStorage {
+    archive: PathBuf,
+    runtime: PathBuf,
+}
+
+impl SessionStorage {
+    fn for_provider(provider: &Path, socket: &Path) -> Option<Self> {
+        if !provider.with_file_name("profile-store").is_file() {
+            return None;
+        }
+        let state = slipmat_core::paths::state_dir()?;
+        fs::create_dir_all(&state).ok()?;
+        Some(Self {
+            archive: state.join("native-session.enc"),
+            runtime: socket.with_file_name("slipmat-native-profile"),
+        })
+    }
+
+    fn remove_runtime(&self) {
+        let _ = fs::remove_dir_all(&self.runtime);
+    }
+
+    fn forget(&self) -> io::Result<()> {
+        match fs::remove_file(&self.archive) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            result => result,
+        }
+    }
+}
+
 pub struct Service {
     provider: PathBuf,
+    storage: Option<SessionStorage>,
     session: RefCell<Session>,
     attempt_timeout: Duration,
 }
@@ -202,6 +250,24 @@ enum Trial {
 }
 
 impl Service {
+    async fn restore(&self) {
+        let reservation = Reservation(&self.session);
+        if let Ok(mut provider) =
+            Provider::spawn_with_storage(&self.provider, self.storage.as_ref(), "restore")
+            && matches!(
+                timeout(Duration::from_secs(75), provider.exchange(Request::Begin)).await,
+                Ok(Ok(Some(Reply::SignedIn)))
+            )
+            && matches!(provider.child.try_wait(), Ok(None))
+        {
+            self.session.replace(Session::SignedIn(Box::new(provider)));
+            tracing::info!("restored native Apple Music session");
+            return;
+        }
+        drop(reservation);
+        tracing::info!("saved native session could not be restored");
+    }
+
     fn reap_provider(&self) {
         let mut session = self.session.borrow_mut();
         if let Session::SignedIn(provider) = &mut *session
@@ -224,6 +290,10 @@ impl Service {
         }
     }
 
+    pub fn is_authenticating(&self) -> bool {
+        matches!(*self.session.borrow(), Session::Busy)
+    }
+
     pub fn is_signed_in(&self) -> bool {
         self.reap_provider();
         match &*self.session.borrow() {
@@ -235,6 +305,16 @@ impl Service {
 
     async fn sign_out(&self) -> Reply {
         self.reap_provider();
+        if matches!(*self.session.borrow(), Session::Busy) {
+            return Reply::Busy;
+        }
+        if self
+            .storage
+            .as_ref()
+            .is_some_and(|storage| storage.forget().is_err())
+        {
+            return Reply::Failed;
+        }
         let trial = match &*self.session.borrow() {
             Session::Playing { trial, .. } => {
                 let updates = trial.subscribe();
@@ -328,7 +408,9 @@ impl Service {
         *self.session.borrow_mut() = Session::Busy;
         let reservation = Reservation(&self.session);
         let deadline = Instant::now() + self.attempt_timeout;
-        let Ok(mut provider) = Provider::spawn(&self.provider) else {
+        let Ok(mut provider) =
+            Provider::spawn_with_storage(&self.provider, self.storage.as_ref(), "seed")
+        else {
             return End::Reply(Reply::Failed);
         };
         let mut end = provider.authenticate(read, write, deadline).await;
@@ -461,13 +543,18 @@ enum End {
 }
 
 struct Provider {
+    runtime_profile: Option<PathBuf>,
     child: Child,
     input: ChildStdin,
     output: Reader<ChildStdout>,
 }
 
 impl Provider {
-    fn spawn(path: &Path) -> io::Result<Self> {
+    fn spawn_with_storage(
+        path: &Path,
+        storage: Option<&SessionStorage>,
+        mode: &str,
+    ) -> io::Result<Self> {
         let metadata = fs::metadata(path)?;
         if !metadata.is_file()
             || metadata.mode() & 0o111 == 0
@@ -488,6 +575,18 @@ impl Provider {
             .stderr(Stdio::null())
             .process_group(0)
             .kill_on_drop(true);
+        if let Some(storage) = storage {
+            command
+                .arg("--session-profile")
+                .arg(&storage.runtime)
+                .arg(&storage.archive)
+                .arg(mode);
+            for name in ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"] {
+                if let Some(value) = std::env::var_os(name) {
+                    command.env(name, value);
+                }
+            }
+        }
         // SAFETY: the callback only uses async-signal-safe Linux operations.
         // Recheck the parent after installing the signal to cover a fork race.
         unsafe {
@@ -513,6 +612,7 @@ impl Provider {
         let input = child.stdin.take().ok_or_else(missing_pipe)?;
         let output = Reader::new(child.stdout.take().ok_or_else(missing_pipe)?);
         Ok(Self {
+            runtime_profile: storage.map(|storage| storage.runtime.clone()),
             child,
             input,
             output,
@@ -683,6 +783,9 @@ impl Provider {
 impl Drop for Provider {
     fn drop(&mut self) {
         let _ = self.kill_group();
+        if let Some(profile) = &self.runtime_profile {
+            let _ = fs::remove_dir_all(profile);
+        }
     }
 }
 
@@ -738,6 +841,7 @@ mod tests {
         Rc::new(Service {
             provider: Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/native-auth-provider"),
+            storage: None,
             session: RefCell::new(Session::SignedOut),
             attempt_timeout,
         })
@@ -816,6 +920,7 @@ mod tests {
                     .unwrap();
                 let provider_pid = worker.id().unwrap();
                 let provider = Provider {
+                    runtime_profile: None,
                     input: worker.stdin.take().unwrap(),
                     output: Reader::new(worker.stdout.take().unwrap()),
                     child: worker,

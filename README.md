@@ -170,7 +170,11 @@ MusicKit library operations.
 Native and library sign-ins are separate. Slipmat opens the native sign-in
 dialog when playback needs it. CLImat prompts you to run `climat sign-in`
 from a second terminal. The selected queue item starts after successful native
-sign-in. The native session ends when the daemon exits.
+sign-in. With Linux Secret Service available through `secret-tool`, Slipmat
+saves the native profile encrypted and tries it again at daemon startup.
+Native sign-out removes the saved profile, and an expired session requires
+a new sign-in. The Apple Account password and verification code are used
+during sign-in only.
 
 Native playback buffers each licensed track before opening the audio output.
 Queue playback, pause, and skips work across both clients. Seeking, shuffle,

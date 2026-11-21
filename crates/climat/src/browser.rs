@@ -41,8 +41,7 @@ pub enum Showing {
     /// An album, artist or playlist. `header` is `None` until the daemon
     /// answers, so an opening page says whose it is rather than going blank.
     Page {
-        title: String,
-        subtitle: String,
+        page: crate::navigation::Page,
         loading: bool,
     },
 }
@@ -59,10 +58,11 @@ pub struct Browser {
     /// there showing a box full of somebody else's search. A filter belongs to
     /// the list it was typed for, the same way a sort does.
     ///
-    /// Five slots: the four library sections and the catalog, whose text is not
+    /// Six slots: the four library sections, the detail page, and the catalog, whose text is not
     /// a filter but a question already asked of Apple — losing it on the way to
     /// the queue and back would mean asking again.
-    filters: [String; 5],
+    pub(crate) filters: [String; 6],
+    pub page_rows: Vec<Entry>,
     /// Whether the field has the keyboard. `/` opens it; Esc closes it and
     /// clears it, because a filter you cannot see is a list that is lying about
     /// what the library holds.
@@ -115,6 +115,7 @@ impl Default for Browser {
             cursor: 0,
             showing: Showing::Library,
             filters: Default::default(),
+            page_rows: Vec::new(),
             typing: false,
             found: Vec::new(),
             kinds: CatalogFilter::default(),
@@ -148,6 +149,8 @@ impl Browser {
     fn filter_slot(&self) -> usize {
         if self.showing.is_catalog() {
             SECTIONS.len()
+        } else if matches!(self.showing, Showing::Page { .. }) {
+            SECTIONS.len() + 1
         } else {
             slot(self.view)
         }
@@ -308,18 +311,16 @@ impl Browser {
 /// browser knows nothing about it, but it belongs in the same row because it is
 /// one of the places the one pane can be showing.
 pub fn header(browser: &Browser, queue: Option<usize>, width: usize) -> Line<'static> {
-    if let Showing::Page {
-        title,
-        subtitle,
-        loading,
-    } = &browser.showing
-    {
+    if let Showing::Page { page, loading } = &browser.showing {
         let mut spans = vec![Span::styled(
-            title.to_uppercase(),
+            page.title.to_uppercase(),
             Style::from(MUTED()).add_modifier(Modifier::BOLD),
         )];
-        if !subtitle.is_empty() {
-            spans.push(Span::styled(format!("   {subtitle}"), Style::from(DIM())));
+        if !page.subtitle.is_empty() {
+            spans.push(Span::styled(
+                format!("   {}", page.subtitle),
+                Style::from(DIM()),
+            ));
         }
         if *loading {
             spans.push(Span::styled("   opening…", Style::from(DIM())));
@@ -411,6 +412,8 @@ pub fn search_height(browser: &Browser) -> u16 {
 pub fn search_box(browser: &Browser, width: usize) -> Vec<Line<'static>> {
     let label = if browser.showing.is_catalog() {
         " search Apple Music "
+    } else if matches!(browser.showing, Showing::Page { .. }) {
+        " filter this page "
     } else {
         " filter the library "
     };

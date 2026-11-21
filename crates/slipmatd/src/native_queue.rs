@@ -45,7 +45,7 @@ pub(super) async fn run(
                 player.command(&daemon, cmd);
             }
             reply = receive(&mut player.active) => player.reply(&daemon, reply),
-            _ = tick.tick(), if daemon.native_sign_in_required() => {}
+            _ = tick.tick(), if player.playing && player.active.is_none() => {}
         }
         player.start(&daemon, service.as_ref());
     }
@@ -242,6 +242,9 @@ impl QueuePlayer {
             self.fail(daemon, "Native playback is unavailable. Prepare the FairPlay provider and restart Slipmat.");
             return;
         };
+        if service.is_authenticating() {
+            return;
+        }
         if !service.is_signed_in() {
             if !daemon.native_sign_in_required() {
                 Self::state(daemon, PlaybackState::Paused);

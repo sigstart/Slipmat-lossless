@@ -73,6 +73,7 @@ mod background;
 mod chrome;
 mod library;
 mod native_auth;
+pub(crate) mod navigation;
 mod osd;
 mod pages;
 mod pins;
@@ -254,6 +255,8 @@ pub struct AppModel {
     /// search you were in the middle of.
     library_query: String,
     catalog_query: String,
+    resume_pages: Option<Vec<navigation::SavedPage>>,
+    resume_scroll: Option<f64>,
     /// Which sidebar section is showing. `scope()` derives the search scope
     /// from it; never store both.
     view: View,
@@ -1120,6 +1123,7 @@ impl Component for AppModel {
                                         // detail pages there is no header above
                                         // them, so the GridView can be the
                                         // scrollable child and stay virtualised.
+                                        #[name = "album_scroller"]
                                         add_named[Some("albums")] = &gtk::ScrolledWindow {
                                             set_vexpand: true,
                                             set_hscrollbar_policy: gtk::PolicyType::Never,
@@ -1138,6 +1142,7 @@ impl Component for AppModel {
                                             },
                                         },
 
+                                        #[name = "artist_scroller"]
                                         add_named[Some("artists")] = &gtk::ScrolledWindow {
                                             set_vexpand: true,
                                             set_hscrollbar_policy: gtk::PolicyType::Never,
@@ -1156,6 +1161,7 @@ impl Component for AppModel {
                                             },
                                         },
 
+                                        #[name = "playlist_scroller"]
                                         add_named[Some("playlists")] = &gtk::ScrolledWindow {
                                             set_vexpand: true,
                                             set_hscrollbar_policy: gtk::PolicyType::Never,
@@ -1349,6 +1355,10 @@ impl Component for AppModel {
             art_sender.input(AppMsg::NeedTileArt(key, art));
         });
 
+        let saved = navigation::Navigation::load();
+        let view = View::from(settings.section);
+        let resume_on_ready = !saved.pages.is_empty()
+            || (view == View::Search && !saved.catalog_query.trim().is_empty());
         let mut model = AppModel {
             stage: Stage::Starting,
             queue_view,
@@ -1358,7 +1368,7 @@ impl Component for AppModel {
             show_sidebar: settings.show_sidebar,
             sidebar_collapsed: false,
             narrow_header: false,
-            searching: false,
+            searching: saved.searching,
             focus_search: false,
             sync_entry: false,
             animated_shown: std::cell::Cell::new(None),
@@ -1378,9 +1388,11 @@ impl Component for AppModel {
             row_overrides: track_overrides(),
             // filled from `dead_ids` once the model exists (see below)
             all_tracks: Vec::new(),
-            library_query: String::new(),
-            catalog_query: String::new(),
-            view: View::from(settings.section),
+            library_query: saved.library_query,
+            catalog_query: saved.catalog_query,
+            resume_pages: resume_on_ready.then_some(saved.pages),
+            resume_scroll: (saved.scroll > 0.0).then_some(saved.scroll),
+            view,
             sorts: view::Sorts {
                 songs: view::Sort {
                     by: SortBy::parse(&settings.sort).valid_for(View::Songs.sortable()),
@@ -1425,7 +1437,7 @@ impl Component for AppModel {
             tile_art_request,
             catalog: Vec::new(),
             catalog_paged: 0,
-            catalog_filter: CatalogFilter::default(),
+            catalog_filter: CatalogFilter::parse(&saved.catalog_filter),
             background: None,
             pages: Vec::new(),
             page_for: std::collections::HashMap::new(),
@@ -1515,6 +1527,7 @@ impl Component for AppModel {
         let volume_osd = &osd_revealer;
         let widgets = view_output!();
 
+        widgets.search_entry.set_text(model.query());
         wiring::connect(&mut model, &widgets, &root, &sender);
 
         // The drawer opens to most of the window, rather than to whatever
@@ -1566,6 +1579,17 @@ impl Component for AppModel {
         sender: ComponentSender<Self>,
         root: &Self::Root,
     ) {
+        if matches!(msg, AppMsg::Quit)
+            || (matches!(msg, AppMsg::WindowCloseRequested) && !self.mirror.queue.is_empty())
+        {
+            self.save_navigation(widgets);
+        }
+        if matches!(&msg, AppMsg::SetView(view) if *view != self.view)
+            || matches!(&msg, AppMsg::SearchChanged(query) if query != self.query())
+        {
+            self.resume_scroll = None;
+            self.resume_pages = None;
+        }
         let view_before = self.view;
         self.update(msg, sender.clone(), root);
         self.sync_animated(widgets);
@@ -1597,6 +1621,7 @@ impl Component for AppModel {
 
         let painting = std::time::Instant::now();
         self.update_view(widgets, sender);
+        self.resume_results_scroll(widgets);
         let ms = painting.elapsed().as_millis();
         if ms > 4 {
             // Only the slow ones: at ~60fps anything over 16ms drops a frame,
@@ -1630,6 +1655,7 @@ impl Component for AppModel {
         self.sync_pins(widgets, &sender);
         self.sync_section_spinners();
         self.update_view(widgets, sender);
+        self.resume_results_scroll(widgets);
     }
 
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>, root: &Self::Root) {

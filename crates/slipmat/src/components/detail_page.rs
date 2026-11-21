@@ -45,7 +45,7 @@ const SUBTITLE_CHARS: usize = 48;
 /// 404s against `/catalog`, and a catalog id 404s against `/me/library`. Making
 /// the compiler ask which one you have keeps the two from being mixed up in a
 /// year's time.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PageKind {
     Album(String),
     Artist(String),
@@ -134,6 +134,9 @@ pub struct DetailPage {
     /// What the list currently shows. The caller reads this to build a queue.
     pub entries: Vec<Entry>,
 
+    pub kind: PageKind,
+    pub resume_scroll: Option<f64>,
+    scroller: gtk::ScrolledWindow,
     page: adw::NavigationPage,
     list: TypedListView<LibraryItem, gtk::NoSelection>,
     state: RowState,
@@ -160,7 +163,7 @@ impl DetailPage {
     /// for the header's three buttons.
     pub fn new(
         id: u64,
-        heading: &str,
+        kind: PageKind,
         state: RowState,
         on_activate: impl Fn(usize) + 'static,
         header: HeaderActions,
@@ -183,7 +186,7 @@ impl DetailPage {
             .css_classes(["title-1"])
             .wrap(true)
             .justify(gtk::Justification::Center)
-            .label(heading)
+            .label(kind.heading())
             .build();
         // **Bounded on both axes.** This holds a curator's name most of the
         // time — two or three words — but falls back to a playlist's blurb,
@@ -315,7 +318,7 @@ impl DetailPage {
         toolbar.set_content(Some(&stack));
 
         let page = adw::NavigationPage::builder()
-            .title(heading)
+            .title(kind.heading())
             // The tag is how a pop finds its way back to this struct. An id,
             // not a depth — see the module docs.
             .tag(id.to_string())
@@ -325,6 +328,9 @@ impl DetailPage {
         Self {
             id,
             entries: Vec::new(),
+            kind,
+            resume_scroll: None,
+            scroller: content,
             page,
             list,
             state,
@@ -345,6 +351,11 @@ impl DetailPage {
 
     pub fn set_shuffle_supported(&self, supported: bool) {
         self.shuffle.set_sensitive(supported);
+    }
+
+    pub fn scroll_position(&self) -> f64 {
+        self.resume_scroll
+            .unwrap_or_else(|| self.scroller.vadjustment().value())
     }
 
     pub fn widget(&self) -> &adw::NavigationPage {
@@ -497,6 +508,9 @@ impl DetailPage {
         self.entries = entries;
         self.stack
             .set_visible_child_name(if anything { "content" } else { "empty" });
+        if let Some(value) = self.resume_scroll.take().filter(|_| anything) {
+            crate::app::navigation::restore_scroll(&self.scroller, value);
+        }
     }
 
     /// Show the cover, once it has been fetched to disk.

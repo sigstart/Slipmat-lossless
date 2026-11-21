@@ -142,7 +142,7 @@ impl AppModel {
         let sidebar = sender.clone();
         let page = DetailPage::new(
             id,
-            kind.heading(),
+            kind.clone(),
             RowState {
                 overrides: self.row_overrides.clone(),
                 current: self.current_track.clone(),

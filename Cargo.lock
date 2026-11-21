@@ -315,6 +315,7 @@ dependencies = [
  "libpulse-binding",
  "ratatui",
  "rustfft",
+ "serde",
  "serde_json",
  "slipmat-core",
  "tokio",

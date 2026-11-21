@@ -50,8 +50,8 @@ using the [source setup instructions](../../README.md#development).
 ### Native authentication commands
 
 When CLImat shows `Run climat sign-in`, run that command from a second terminal.
-The queue starts the selected track after sign-in. The prompts hide your Apple Account, password, and verification codes
-as you type. Press `Ctrl+C` to cancel.
+The queue starts the selected track after sign-in. Your Apple Account email and
+verification code are visible as you type. The password stays hidden. Press `Ctrl+C` to cancel.
 
 `climat sign-in-status` reports whether a native Apple Music session is active,
 and `climat sign-out` ends the session. Run `climat` to open the player UI.
@@ -131,7 +131,7 @@ tenth of a second and gets the original palette.
 | `5` | All of Apple Music |
 | `6` | The queue |
 | `⇥` | Walk the tabs |
-| `/` | Filter the library, or search Apple Music |
+| `/` | Filter the current list, or search Apple Music |
 | `o` | Order by the next thing this section can be sorted by |
 | `t` | On Apple Music: what kinds of thing to search for |
 | `O` | Turn that order round |
@@ -144,6 +144,9 @@ tenth of a second and gets the original palette.
 | `d` | Remove it from the queue |
 | `i` `k` | Move it up / down in the queue |
 | `q`, `Ctrl+C` | Close CLImat and keep playback running. Use `Ctrl+C` while typing in a filter. |
+
+CLImat reopens on your last browsing tab or detail page and restores your
+filter and highlighted row.
 
 A `▸` marks a row that opens a page rather than playing. A rule runs to the far end of the strip, carrying whatever
 that tab has to say about itself — the order on a library section, the number of

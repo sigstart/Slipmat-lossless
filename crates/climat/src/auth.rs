@@ -185,14 +185,12 @@ async fn sign_in(client: &mut Client) -> Result<Reply> {
         return Ok(reply);
     }
 
-    let terminal = SecretTerminal::open()?;
-    let account = terminal.prompt("Apple Account (hidden): ").await?;
-    let password = terminal.prompt("Apple password (hidden): ").await?;
+    let terminal = SignInTerminal::open()?;
+    let account = terminal.prompt("Apple Account email: ", true).await?;
+    let password = terminal.prompt("Apple password (hidden): ", false).await?;
     let mut reply = auth_reply(client.credentials(account, password).await)?;
     while matches!(reply, Reply::VerificationRequired) {
-        let code = terminal
-            .prompt("Apple verification code (hidden): ")
-            .await?;
+        let code = terminal.prompt("Apple verification code: ", true).await?;
         reply = auth_reply(client.verification_code(code).await)?;
     }
     Ok(reply)
@@ -202,12 +200,12 @@ fn auth_reply(reply: io::Result<Reply>) -> Result<Reply> {
     reply.map_err(|_| anyhow!("Communication with the native authentication endpoint failed."))
 }
 
-struct SecretTerminal {
+struct SignInTerminal {
     tty: AsyncFd<File>,
     original: libc::termios,
 }
 
-impl SecretTerminal {
+impl SignInTerminal {
     fn open() -> Result<Self> {
         let tty_required = || anyhow!("Native sign-in requires an interactive terminal.");
         if !io::stdin().is_terminal() {
@@ -228,25 +226,26 @@ impl SecretTerminal {
         // SAFETY: tcgetattr succeeded and initialized the termios.
         let original = unsafe { original.assume_init() };
         let tty = AsyncFd::new(tty).map_err(|_| tty_required())?;
-        let mut hidden = original;
-        hidden.c_lflag &= !(libc::ECHO | libc::ECHONL);
-        hidden.c_lflag |= libc::ICANON | libc::ISIG;
-        hidden.c_iflag |= libc::ICRNL;
-        hidden.c_cc[libc::VINTR] = 3;
-        // Keep the process running long enough to restore echo on exit.
-        hidden.c_cc[libc::VQUIT] = libc::_POSIX_VDISABLE;
-        hidden.c_cc[libc::VSUSP] = libc::_POSIX_VDISABLE;
-        set_terminal(fd, &hidden)
-            .map_err(|_| anyhow!("Could not disable terminal echo for native sign-in."))?;
         Ok(Self { tty, original })
     }
 
-    async fn prompt(&self, label: &str) -> Result<String> {
+    async fn prompt(&self, label: &str, echo: bool) -> Result<String> {
         let input_failed = || anyhow!("Could not read from the native sign-in terminal.");
-        // SAFETY: the terminal owns this live fd. Discard input typed before the prompt.
-        if unsafe { libc::tcflush(self.tty.as_raw_fd(), libc::TCIFLUSH) } == -1 {
-            return Err(input_failed());
+        let mut mode = self.original;
+        if echo {
+            mode.c_lflag |= libc::ECHO;
+        } else {
+            mode.c_lflag &= !(libc::ECHO | libc::ECHONL);
         }
+        mode.c_lflag |= libc::ICANON | libc::ISIG;
+        mode.c_iflag |= libc::ICRNL;
+        mode.c_cc[libc::VINTR] = 3;
+        // Keep the process running long enough to restore terminal settings.
+        mode.c_cc[libc::VQUIT] = libc::_POSIX_VDISABLE;
+        mode.c_cc[libc::VSUSP] = libc::_POSIX_VDISABLE;
+        set_terminal(self.tty.as_raw_fd(), &mode)
+            .map_err(|_| anyhow!("Could not set terminal echo for native sign-in."))?;
+
         let mut tty = self.tty.get_ref();
         tty.write_all(label.as_bytes())
             .map_err(|_| input_failed())?;
@@ -258,7 +257,9 @@ impl SecretTerminal {
             .async_io(Interest::READABLE, |mut tty| tty.read(&mut line))
             .await
             .map_err(|_| input_failed())?;
-        tty.write_all(b"\n").map_err(|_| input_failed())?;
+        if !echo {
+            tty.write_all(b"\n").map_err(|_| input_failed())?;
+        }
         line.truncate(count);
         if line.pop() != Some(b'\n') {
             bail!("Native sign-in input cancelled.");
@@ -270,7 +271,7 @@ impl SecretTerminal {
     }
 }
 
-impl Drop for SecretTerminal {
+impl Drop for SignInTerminal {
     fn drop(&mut self) {
         let _ = set_terminal(self.tty.as_raw_fd(), &self.original);
     }

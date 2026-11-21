@@ -47,6 +47,7 @@ cp "$repo/scripts/fairplay-trial/provider_test.go" "$trial/engine/cmd/slipmat-fa
     go build -buildvcs=false -mod=readonly -tags adamplay_backend \
         -o "$trial/provider" ./cmd/slipmat-fairplay-trial
 )
+go build -o "$trial/profile-store" "$repo/scripts/fairplay-trial/profile-store.go"
 cp "$trial/drm/libdrm_client.so" "$trial/libdrm_client.so"
 cp "$repo/target/debug/fairplay-alac-output" "$trial/fairplay-alac-output"
 cp "$repo/scripts/fairplay-trial/launch.sh" "$trial/launch"

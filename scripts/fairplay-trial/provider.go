@@ -83,6 +83,9 @@ func run() int {
 	input := bufio.NewScanner(os.Stdin)
 	input.Buffer(make([]byte, 8192), 8192)
 	stream := &wire{input: input, output: json.NewEncoder(control)}
+	if len(os.Args) == 2 && os.Args[1] == "--restore-probe" {
+		return stream.restoreProbe()
+	}
 	if !stream.signInAndPlay() {
 		return 1
 	}
@@ -120,6 +123,54 @@ func (w *wire) Challenge(_ context.Context, challenge drm.AuthChallenge) (string
 		return "", errors.New("verification cancelled")
 	}
 	return msg.Code, nil
+}
+
+// A successful authenticated storefront lookup proves the restarted worker
+// can use the saved session without requesting a password or a second factor.
+func (w *wire) restoreProbe() int {
+	if _, ok := w.read("begin"); !ok {
+		return 1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	backend := drm.AdamplayBackend("/app")
+	if err := backend.Start(ctx, drm.BackendConfig{BaseDir: "/state/files"}); err == nil {
+		defer backend.Stop()
+		if !waitForFairPlay(ctx, backend) {
+			_ = w.output.Encode(result{Type: "failed"})
+			return 1
+		}
+		account, err := nativeAccount()
+		var regions struct{ Data []struct{ ID string } }
+		if err == nil && musicJSON(ctx, musicClient, musicAPI+"/me/storefront", account.DevToken, account.MusicToken, &regions) == http.StatusOK &&
+			len(regions.Data) == 1 && storefrontCode(regions.Data[0].ID) {
+			_ = w.output.Encode(result{Type: "signedIn"})
+			if w.playTracks(func(ctx context.Context, track string, control *playbackControl, report func(result)) result {
+				return play(ctx, backend, track, control, report)
+			}) {
+				return 0
+			}
+			return 1
+		}
+	}
+	_ = w.output.Encode(result{Type: "failed"})
+	return 1
+}
+
+func waitForFairPlay(ctx context.Context, backend drm.DRMBackend) bool {
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case event, ok := <-backend.Events():
+			if !ok {
+				return false
+			}
+			if event.Snapshot.State.FairPlay == drm.FairPlayReady {
+				return true
+			}
+		}
+	}
 }
 
 func (w *wire) signInAndPlay() bool {

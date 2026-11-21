@@ -188,6 +188,8 @@ impl AppModel {
                 };
                 if clear {
                     self.forget_session(sender);
+                } else if matches!(self.stage, Stage::Ready) {
+                    self.resume_navigation(sender);
                 }
             }
             Event::LibraryChanged => {
