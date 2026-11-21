@@ -4,11 +4,7 @@
 #
 # What Slipmat costs the machine it runs on: memory, CPU, and disk.
 #
-# There is no single number, and the obvious one is wrong. Slipmat is a Rust
-# process supervising a Chromium, and Chromium is six or seven processes that
-# share most of their pages. Adding up RSS counts that shared memory once per
-# process and roughly doubles the answer, which is how a browser engine gets
-# reported as costing a gigabyte it is not using.
+# RSS counts shared memory once per process.
 #
 # So this reports **PSS** — proportional set size, where a page shared by four
 # processes counts a quarter in each. It is the number that answers "how much
@@ -53,15 +49,9 @@ human() { # KB -> human
 
 disk() {
 	echo "DISK"
-	# The sidecar dominates everything else by an order of magnitude, and it is
-	# not ours: it is a whole Chromium, which is the price of the only Widevine
-	# CDM that exists on Linux. Reported separately for exactly that reason —
-	# nothing we write will ever move that number.
 	local rows=(
 		"the app itself|target/release/slipmat"
 		"the daemon|target/release/slipmatd"
-		"the sidecar (Chromium)|sidecar/node_modules"
-		"Widevine CDM + session|$HOME/.config/Slipmat"
 		"artwork + library cache|$HOME/.cache/slipmat"
 		"last session|${XDG_STATE_HOME:-$HOME/.local/state}/slipmat"
 	)
@@ -78,7 +68,7 @@ disk() {
 	done
 	echo
 	echo "  The cache is the only one that grows with use, and it is swept:"
-	echo "  see components/prune.rs. The sidecar never changes."
+	echo "  see components/prune.rs."
 }
 
 if [ "${1:-}" = "--disk" ]; then
@@ -116,9 +106,7 @@ if [ ${#ROOTS[@]} -eq 0 ]; then
 	exit 1
 fi
 
-# Every descendant, depth first. The tree is not two levels: GTK's image loaders
-# (glycin) run in bwrap sandboxes that hang off both the app and the sidecar, and
-# they are real memory that a naive parent-and-children walk misses.
+# Include the provider and sandboxed image loaders in the process tree.
 descendants() {
 	local p=$1 c
 	echo "$p"
@@ -131,25 +119,14 @@ done
 # A daemon spawned by the GTK client is also a root through its MPRIS name.
 mapfile -t PIDS < <(printf '%s\n' "${PIDS[@]}" | sort -nu)
 
-# What each process is for. Chromium tells you in its own argv, and seven rows
-# reading "electron" is not a report.
 role() {
 	local cmd=$1
 	case "$cmd" in
-	*--type=renderer*) echo "sidecar: renderer (MusicKit)" ;;
-	*--type=gpu-process*) echo "sidecar: gpu" ;;
-	*--type=zygote*) echo "sidecar: zygote" ;;
-	*--type=utility*)
-		case "$cmd" in
-		*NetworkService*) echo "sidecar: network" ;;
-		*AudioService*) echo "sidecar: audio" ;;
-		*) echo "sidecar: utility" ;;
-		esac
-		;;
-	*--type=broker*) echo "sidecar: broker" ;;
+	*fairplay-alac-output*) echo "native audio output" ;;
+	*profile-store*) echo "native profile helper" ;;
+	*/app/provider*) echo "native playback provider" ;;
 	*glycin*) echo "image decoder (sandboxed)" ;;
 	*bwrap*) echo "sandbox wrapper" ;;
-	*electron*) echo "sidecar: main" ;;
 	*slipmatd*) echo "the daemon (Rust)" ;;
 	*) echo "the app (Rust + GTK)" ;;
 	esac
@@ -195,7 +172,7 @@ printf '  %7s %-28s %9s %9s %6s%%\n' "" "$(printf '%d processes' "${#PIDS[@]}")"
 	"$(human "$rss_total")" "$(human "$pss_total")" "$cpu_total"
 echo
 echo "  PSS is the honest total. The RSS column sums to a much larger number"
-echo "  because Chromium's processes share most of their pages, and adding RSS"
+echo "  because multiple processes can share pages, and adding RSS"
 echo "  counts that shared memory once per process."
 echo
 echo "  CPU is % of one core. Anything near 100 is the class of bug that froze a"

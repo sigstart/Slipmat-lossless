@@ -20,11 +20,11 @@ push=${2:-}
 repo=$(git rev-parse --show-toplevel)
 src="$repo/packaging/aur/$pkg"
 
-if [[ ! -d $src ]]; then
+if [[ $pkg != slipmat-git || ! -d $src ]]; then
     # The argument is a **package base**, which is the directory here and the
     # repository on the AUR. `slipmat-git` is a split base: one push publishes
     # slipmat-daemon-git, slipmat-git and climat-git together.
-    echo "usage: $0 <slipmat|slipmat-git> [--push]" >&2
+    echo "usage: $0 slipmat-git [--push]" >&2
     exit 2
 fi
 
@@ -52,10 +52,7 @@ printf '%s\n' '*' '!PKGBUILD' '!.SRCINFO' '!LICENSE' '!.gitignore' > .gitignore
 # something that reads as broken. Helpers cope either way — they run `pkgver()`
 # themselves — but the package page is what a person looks at.
 #
-# `--noprepare` is what makes this affordable: `prepare()` runs `npm install`
-# and fetches ~200 MB of Electron, and none of it is needed to answer "what
-# would this build call itself". What is left is a source clone and
-# `git describe`. `--nodeps` because nothing is being compiled.
+# Skip compilation and dependency preparation when calculating the version.
 #
 # It rewrites the working copy, never the tree's own PKGBUILD — makepkg runs
 # here, on the copy.

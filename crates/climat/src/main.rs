@@ -8,9 +8,6 @@
 //! press becomes a request, and the screen moves when the daemon answers. That
 //! is rule 3 reaching the third layer, and it is what keeps a terminal and a
 //! GTK window from disagreeing about what is playing.
-//!
-//! Library browsing needs a graphical session for the daemon's Chromium
-//! sidecar. The shared native playback worker handles the audio.
 
 mod auth;
 mod browser;
@@ -28,7 +25,7 @@ use crossterm::event::{
 use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
 use futures::StreamExt;
 use slipmat_core::ipc::{
-    Event, PlayMode, Request, Snapshot, Stage, Transport, View as LibraryView,
+    Event, PlayMode, Request, Snapshot, Stage, Transport, View as LibraryView, WriteAction,
 };
 use slipmat_core::player::protocol::RepeatMode;
 
@@ -366,6 +363,23 @@ fn on_key(key: KeyEvent, link: &link::Link, app: &mut App) -> bool {
             link.send(Request::Transport(Transport::SetRepeat {
                 mode: next_repeat(app.snap.repeat),
             }))
+        }
+        KeyCode::Char(key @ ('A' | 'F'))
+            if app.pane == Pane::Browser && matches!(app.stage, Stage::Ready) =>
+        {
+            if let Some(id) = app.browser.selected().and_then(|entry| entry.catalog_id()) {
+                let action = if key == 'A' {
+                    WriteAction::AddToLibrary
+                } else {
+                    WriteAction::Favorite
+                };
+                link.send(Request::Write {
+                    action,
+                    id: id.to_owned(),
+                });
+            } else {
+                app.message = Some(Notice::bad("Select an Apple Music song first"));
+            }
         }
         KeyCode::Char('R') if matches!(app.stage, Stage::Ready) => {
             link.send(Request::Refresh);

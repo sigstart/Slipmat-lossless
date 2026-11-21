@@ -19,7 +19,7 @@ esac
 printf '%s\n' '{"type":"verificationRequired"}'
 IFS= read -r frame
 [ "$frame" = '{"type":"verificationCode","code":"123456"}' ] || exit 1
-printf '%s\n' '{"type":"signedIn"}'
+printf '%s\n' '{"type":"signedIn","catalogue":{"developerToken":"fixture-developer","musicUserToken":"fixture-user","storefront":"us","authorized":true}}'
 while IFS= read -r frame; do
     case "$frame" in
         '{"type":"playTrack","track_id":"123"}')

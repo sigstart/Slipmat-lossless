@@ -39,13 +39,6 @@ impl Model {
         }
     }
 
-    pub fn clear_account_state(&mut self) {
-        self.player = PlayerState::new();
-        self.tokens = None;
-        self.library = Library::default();
-        self.art_path = None;
-    }
-
     pub fn current_item(&self) -> Option<&slipmat_core::player::protocol::Item> {
         self.player
             .now_playing

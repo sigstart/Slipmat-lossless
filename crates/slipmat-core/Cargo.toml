@@ -1,6 +1,6 @@
 [package]
 name = "slipmat-core"
-description = "The Apple Music engine: the sidecar contract and the catalog client"
+description = "Shared Apple Music API, playback state, and client protocol"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

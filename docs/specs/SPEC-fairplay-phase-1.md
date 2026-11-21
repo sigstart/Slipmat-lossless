@@ -1,5 +1,7 @@
 # FairPlay backend evaluation
 
+> Migration record. The current build uses the native provider for playback and catalogue access.
+
 ## Goal
 
 Replace the Chromium/Electron sidecar with a native Linux x86-64 backend using

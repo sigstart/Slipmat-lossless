@@ -12,43 +12,18 @@ felt disc between the platter and the record: the layer that sits between the
 mechanism and the music, and lets the record turn on its own terms.
 
 **Why this project exists.** Apple ships no Linux client. Slipmat draws the
-interface natively and currently uses `music.apple.com` in a hidden Electron
-window for playback. Cider and Sidra solved the DRM first and this
-depends on their groundwork; the difference is where the boundary sits, not who
-did it right. **Never write about them with an edge** — in the README, in
-commits, or in reply to the user.
-
-**The headline feature is playback itself** — gapless transport with correct,
-bidirectional **MPRIS**. Build the rest in service of that.
-
-## Target playback architecture
-
-Replace the Electron sidecar with a native Linux x86-64 FairPlay backend. Load
-the x86-64 FairPlay libraries through `libhybris`, including
-`libandroidappmusic.so`, `libCoreFP.so`, `libCoreLSKD.so`, `libCoreADI.so`,
-`libmediaplatform.so`, and `libstoreservicescore.so`. The full dependency
-inventory comes from Adam's
-[`drm/fairplay-libs.lock`](../INSPIRATION/apple-music-linux/drm/fairplay-libs.lock).
-
-The finished application must sign in, browse the catalogue and library, and
-play ALAC without Chromium, Electron, or Widevine in the build, packages, or
-runtime. GTK and CLImat continue to use `slipmatd` for playback control and
-status. Test natural queue advancement, gapless playback, and MPRIS against the
-new backend. See the [FairPlay spec](docs/specs/SPEC-fairplay-phase-1.md) and
-[licensed playback rules](#1-licensed-playback).
-
-The native backend is pending. Guidance below about the web sidecar, MusicKit
-JS, and Electron-specific packaging describes the current code during the
-migration.
+interface natively and plays licensed ALAC through Apple's Android FairPlay
+libraries. GTK and CLImat share the same playback and account session in
+`slipmatd`. See the [FairPlay spec](docs/specs/SPEC-fairplay-phase-1.md) for the
+migration record.
 
 ### Engine and clients
 
 The engine and the interface are separate concerns, and the interface is no
 longer only GTK:
 
-- **The playback backend** owns the playback session and audio output. The
-  existing implementation uses one hidden Chromium process with one Widevine
-  CDM and one profile lock.
+- **The native provider** owns the authorized session and audio output.
+  The shared daemon owns the queue and advances it on playback completion.
 - **The GTK client** targets GNOME and should be indistinguishable from a
   first-party GNOME application. That is a rule *about this client*, not about
   the project: a design decision that would make it look like an Electron app or
@@ -59,143 +34,6 @@ longer only GTK:
 
 The practical test for new code: **would a client that draws nothing still need
 this?** If yes, it does not belong in `components/` or the reducer.
-## The current Linux web playback backend
-
-Slipmat's web sidecar plays HLS with **Widevine** DRM. Google ships its Linux
-CDM for x86_64 and aarch64 through Chromium's component updater.
-
-| Path                            | Verdict                                                        |
-| ------------------------------- | -------------------------------------------------------------- |
-| WebKitGTK + MusicKit JS         | **Dead.** Ships Clear Key only; no Widevine CDM.                |
-| Rust + GStreamer direct         | **Dead.** Cannot decrypt Widevine-protected HLS.                |
-| Stock Electron                  | **Dead.** `navigator.requestMediaKeySystemAccess` is absent.    |
-| `pywidevine` + an extracted CDM | Outside the licensed playback design in rule 1.                  |
-| **castLabs Electron (`wvcus`)** | **Works.** *Fetches* the CDM — see below. What Sidra uses.      |
-
-**`wvcus` does not ship the CDM — it fetches it.** The suffix is *Widevine CDM
-Update Service*: what castLabs adds is the plumbing that lets Chromium's own
-component updater pull the CDM down, exactly as Chrome does for itself. There is
-no Widevine binary anywhere in the 327 MB Electron dist; verify with
-
-```bash
-find sidecar/node_modules -iname "*widevine*"   # finds nothing
-```
-
-It lands at `~/.config/Slipmat/WidevineCdm/` on first run, beside the copies
-Chrome and Chromium fetched for themselves.
-
-This matters for **packaging**, and this entry used to say "bundles", which
-pointed the wrong way. Nothing Slipmat would ship contains proprietary Google
-code: Electron is MIT, our code is GPL-3, and the CDM arrives on the user's own
-machine through their own component updater into their own config directory. So
-redistribution is not the obstacle it looked like — a Flatpak or an AUR package
-would carry Electron and nothing more, and the CDM download needs only network
-access and a writable, persistent config directory.
-
-**And that is now measured rather than reasoned.** Slipmat was run inside a real
-`org.gnome.Platform//49` sandbox with `--nofilesystem=home`, a private `HOME`
-carrying the Apple session but **no CDM**, and playback worked:
-
-```text
-widevine ready: {"status":"updated","version":"4.10.3050.0"}
-…/.config/Slipmat/WidevineCdm/4.10.3050.0/_platform_specific/linux_x64/libwidevinecdm.so
-```
-
-So the component updater reaches out over `--share=network`, writes into the
-app's own config directory, and the CDM decrypts — a track played. The original
-plan called a sandboxed CDM "genuinely hard" and deferred Flatpak on the
-strength of it; that was reasoning, and it was wrong. What is actually hard is
-the *build*, not the runtime.
-
-**And on 2026-07-28 it stopped being an experiment on the developer's own
-machine.** The `v0.3.0` release bundle was installed on a stock **Ubuntu 25.10**
-VM — a system whose libadwaita is below the `gnome_49` floor, so it cannot build
-Slipmat at all — and the whole chain worked from nothing: sign-in, the CDM
-fetching itself into the sandbox, a real library over the API, and a track
-decrypting and playing. That is the first time any of it has run outside Arch,
-and it is what the Flatpak exists for.
-
-The desktop integration came with it, which is the half that could have failed
-quietly: the icon appears in the app grid rather than needing `flatpak run`, and
-**the shell's media controls appear and work** — so `--own-name` and the bus
-proxy do what the manifest claims on a foreign system. Playback working while
-the shell showed nothing would have been the plausible failure there, and it did
-not happen.
-
-Two things that run also settled, and neither could have been found here:
-
-- **A bundle needs `--runtime-repo`.** It carries the app and never the runtime,
-  so on a machine with no Flathub remote it stops at *"requires the runtime
-  org.gnome.Platform/x86_64/49 which was not found"*. Every machine that has
-  ever *built* this already had the runtime, because building needs the SDK
-  beside it — so the one artefact aimed at systems that cannot build was the one
-  thing never installed on one. Fixed, and then **re-tested on a freshly built
-  VM** rather than the one that had already been repaired by hand: the install
-  adds Flathub and pulls GNOME 49 on its own. Re-testing on the repaired machine
-  would have proved nothing, because the runtime was already there.
-- **The app had never been seen in a light theme.** It works, but the drawer's
-  backdrop is washed out: the veil is `@window_bg_color` so it adapts, but the
-  two numbers behind it were tuned against dark only. Not a design question, a
-  pair of numbers.
-
-Three things that experiment settled, and that a manifest has to carry:
-
-- **`org.electronjs.Electron2.BaseApp`, for zypak.** Chromium's SUID sandbox
-  cannot work inside Flatpak's — without it the sidecar aborts on
-  `chrome-sandbox is owned by root and has mode 4755` and rule 6 restarts it
-  forever. `ELECTRON_DISABLE_SANDBOX=1` proves the rest works but is not the
-  answer to ship.
-- **`--device=dri`.** Without it GTK falls back to software rendering — `egl:
-  failed to create dri2 screen` — and the grids scroll badly enough to read as
-  an app problem rather than a packaging one.
-- **`--own-name=dev.miguelrincon.Slipmat`** and the MPRIS name. Flatpak's bus
-  proxy only lets an app own names matching its ID, and `GtkApplication` exits
-  0 without a window if it cannot register.
-
-One thing that experiment appeared to find was **not real**, and the way it
-resolved is the lesson. `gdk_pixbuf` decoding failed there while everything
-else worked — 650 covers fetched, **0** backdrops written, against 20 on the
-host, on the same files. Tile artwork and the blurred backdrop both vanished,
-and both call `Pixbuf::from_file_at_scale`; `Cover::set_file` kept working
-because `GtkImage` goes through `GdkTexture`. It looked like a portability
-finding worth designing around.
-
-It was an artefact of the rig. Running a *host-built* binary against a foreign
-runtime mixes two variables, and gdk-pixbuf is exactly the sort of thing that
-differs between them. Built properly inside the SDK, against the runtime's own
-libraries, every cover and every backdrop loads. **A host binary in a foreign
-runtime is not a fair test of anything subtle** — it answers "does the sandbox
-allow this" and nothing finer.
-
-## Building the Flatpak
-
-```bash
-make flatpak          # build and install it locally
-make flatpak-bundle   # Slipmat-<architecture>.flatpak to carry elsewhere
-```
-
-Three things in the manifest are not obvious and were each found the hard way:
-
-- **zypak wraps `electron`, not the app.** It has to be the *direct* parent of
-  Chromium, and Chromium is the app's grandchild — the launcher starts Rust,
-  Rust spawns Electron. Wrapping the launcher leaves the sidecar aborting on
-  `chrome-sandbox … mode 4755` exactly as if zypak were absent. So a shim
-  stands where `electron_binary()` looks and wraps the real binary beside it.
-- **No npm tree.** The sidecar's only dependency is Electron itself, and the
-  app runs `node_modules/electron/dist/electron` directly — the other thirteen
-  packages exist only to *download* that binary. So the castLabs release is one
-  pinned archive rather than a generated node-sources list.
-- **The build is offline**, because `flatpak-builder` forbids network. Crates
-  come from `cargo-sources.json`; regenerate it with
-  `packaging/flatpak/generate-sources.sh` whenever `Cargo.lock` changes.
-
-Two Linux facts that follow, and that you must not design around:
-
-- **No VMP signing needed.** Linux Widevine reports `PLATFORM_UNVERIFIED`; the
-  castLabs EVS account is a macOS/Windows concern. Nothing to sign.
-- **No persistent Widevine licences.** The Linux web backend requires a
-  network connection for playback. Slipmat's playback interface is for streaming.
-
 ## Stack
 
 Keep the existing dependencies pinned. The FairPlay prototype may add its own
@@ -210,7 +48,6 @@ playback dependencies.
 | Serde          | `serde`, `serde_json`  | 1                                          |
 | Async runtime  | `tokio`                | 1 (`rt-multi-thread`, `process`, `io-util`)|
 | Logging        | `tracing`              | 0.1                                        |
-| Sidecar shell  | castLabs ECS           | `github:castlabs/electron-releases#v44.1.0+wvcus` |
 
 Rust edition 2024, plus `anyhow` 1 (rule 5) and `tracing-subscriber` 0.3 with
 `env-filter` for `RUST_LOG`. Toolchain ≥ 1.93 (relm4 0.11's MSRV); libadwaita
@@ -248,51 +85,19 @@ Preserve normal account authentication, subscription checks, and DRM licence
 enforcement. Keep content keys private to the DRM component. Keep decrypted
 tracks out of persistent caches, export interfaces, and client IPC.
 
-### 2. Never trust your training data for `mpris-server` or MusicKit JS
+### 2. Check the versioned MPRIS API before adding a call
 
-`mpris-server` went **0.9 → 0.10 in April 2026** and the API changed. Check
-<https://docs.rs/mpris-server/0.10> before writing any call against it.
-`mpris-player` is unmaintained and points here instead — never use it.
+Check the installed `mpris-server` source for the version in `Cargo.lock`.
 
-MusicKit JS has three major versions in the wild with different surfaces, and
-`music.apple.com` ships whichever it likes. **Feature-detect, never assume** (see
-rule 4).
+### 3. The daemon owns and advances the queue
 
-### 3. The playback backend owns and advances the queue
+Clients send playback commands and reconcile the daemon's queue events by
+occurrence ID. Native playback completion advances the queue in the daemon.
 
-This is the single rule that makes gapless possible, and the easiest one to
-break by accident.
+### 4. Report provider failures
 
-The native FairPlay backend must advance the queue itself and report track and
-position changes to the daemon. The MusicKit calls below apply to the existing
-web implementation.
-
-MusicKit's gapless transition happens *inside its own queue advance*. If Rust
-feeds tracks one at a time — play a song, wait for `ended`, send the next — every
-boundary gets a gap and the headline feature is gone.
-
-- Enqueue **once**: `setQueue({ songs: [...ids], startPosition: n })`.
-- Skip with `changeToMediaAtIndex(i)`. **Never** a fresh `setQueue` to move
-  within a queue that is already loaded.
-- `PlayerState.queue` on the Rust side is a **projection**, reconciled from the
-  sidecar's `queueDidChange` event. It is never the source of truth, and the UI
-  never mutates it directly — it sends a command and waits for the echo.
-
-Update rows in place: reconcile by id, rebuild widgets only when membership
-actually changes.
-
-### 4. The web sidecar's injected hook
-
-`sidecar/preload.js` reaches into a page Apple can change without warning. Keep
-it **tiny and defensive**:
-
-- Feature-detect every property (`MusicKit?.getInstance?.()`), never assume.
-- Poll for readiness with a timeout, then **fail loudly** — a
-  `sidecar/hook-failed` event that becomes an `adw::Toast` naming the fix
-  ("Apple Music changed; Slipmat needs an update"). Never degrade silently into
-  a dead player with a spinning UI.
-- Do not scrape the DOM. Only `MusicKit.getInstance()` and its documented events.
-  Scraped markup is what breaks when Apple redesigns; a documented event survives.
+Sign-in, authorization, and playback failures must surface as user-visible
+state or errors.
 
 ### 5. No `.unwrap()` / `.expect()` outside `main.rs` and tests
 
@@ -300,33 +105,19 @@ The sidecar can die, the network can drop, Apple can 403 a stale token. Every
 failure becomes an `adw::Toast` or a state, never a crash. `anyhow::Result`
 internally.
 
-### 6. The sidecar is supervised, not fired-and-forgotten
+### 6. Supervise the native provider
 
-If the child exits, Slipmat restarts it with backoff, replays the queue and
-position, and toasts once. A dead sidecar must never present as a healthy,
-silent player — the same reason a present-but-dead token must not render an
-empty, healthy-looking list.
+Keep the daemon responsive when the provider stops and let users sign in again.
 
-### 7. Tokens never touch disk, logs, or error strings
+### 7. Keep credentials private
 
-**No token is persisted at all** — not to a file, and not to the keyring either.
-
-This rule originally said the Music User Token should go to the Secret Service
-via `oo7`. It never did: `secret.rs` was never written, `oo7` was a dependency
-nothing imported, and the README told people to install a keyring they did not
-need. The rule is amended rather than the code, because what the code does is
-*stronger*: both tokens are re-harvested from `MusicKit.getInstance()` on every
-launch, the sidecar's own session cookie is what persists the login exactly as
-it would in a browser, and there is nothing at rest for anyone to find.
-
-`settings.rs` persists *preferences*; a token is not one. Never `tracing` a
-token, never interpolate one into an error.
+Session credentials travel over the provider's private pipe and stay in daemon
+memory. Keep them out of client events, logs, and error text. The native profile
+helper encrypts saved session data using a key held by Secret Service.
 
 ### 8. Never block the GTK main thread
 
-All HTTP and all sidecar I/O go through relm4 `Command`s. The sidecar's stdout
-reader is a streaming `command` (not `oneshot_command`) — it is a genuine stream,
-the one case that warrants it. `update()` stays synchronous and fast.
+Use relm4 commands for HTTP and daemon I/O. Keep `update()` synchronous and fast.
 
 ### 9. Apple types must not leak into the UI
 
@@ -373,50 +164,12 @@ Rule 10 removes the crutch; this is why it is not missed.
 - Name for the domain, not the mechanism.
 - No abstraction before the third use.
 
-## Current architecture and migration reference
+## Current architecture
 
-```
-┌──────────────────────────────────────────────────┐
-│  Slipmat — Rust · relm4 · libadwaita             │  ← 100% of what the user sees
-│  library · search · queue · Now Playing          │
-│  MPRIS · notifications · media keys · artwork    │
-│  HTTPS ─────────────────► api.music.apple.com    │
-└───────────────────────┬──────────────────────────┘
-                        │  NDJSON over the child's stdin/stdout
-                        │  ↓ setQueue · play · pause · seek · skip
-                        │  ↑ tokens · nowPlayingItem · playbackState · position
-┌───────────────────────▼──────────────────────────┐
-│  sidecar/ — castLabs Electron, BrowserWindow      │  ← invisible after first login
-│  show:false, loading real music.apple.com         │
-│  MusicKit.getInstance()  +  Widevine CDM          │
-│  → audio straight to PipeWire, untouched          │
-└───────────────────────────────────────────────────┘
-```
-
-**Why the sidecar loads real `music.apple.com`** rather than our own MusicKit JS
-page: it is the origin Apple's licence server already trusts, its session cookie
-survives restarts, and it hands us a live developer token for free. A custom
-origin would add DRM risk *and* the $99 Apple Developer Program, and buy nothing
-— the page is never rendered.
-
-This is **verified, not assumed**. The harvested developer token is a JWT whose
-payload reads:
-
-```json
-{ "iss": "AMPWebPlay", "iat": …, "exp": …, "root_https_origin": ["apple.com"] }
-```
-
-`root_https_origin` pins it to `apple.com`. A custom-origin page could not use
-this token at all, so serving our own MusicKit page would have forced the paid
-developer account — the design is not merely convenient, it's the only free
-route. Note also `exp`: the token is good for roughly **70 days**, which is why
-rule 7 says re-harvest every launch instead of caching. Never log the token
-itself; the claims above are safe to reason about, the signature is not.
-
-**Why stdio and not a localhost socket:** no port to allocate, no auth token to
-invent, and no other local process can drive your player. Chromium logs to
-stderr; **stdout carries protocol only** — anything that prints to stdout in the
-sidecar corrupts the channel.
+GTK and CLImat use a Unix socket to browse and control playback. The daemon
+handles Apple Music API requests, queue state, and MPRIS. It starts the native
+provider over private pipes. The provider uses the authorized Apple Music
+session for licensed playback and returns catalogue credentials to the daemon.
 
 ### Where the ids come from, and why it matters
 
@@ -631,203 +384,6 @@ there is nothing to come back to.
 but idle it moves silently, so clicking a track in the queue looked like nothing
 happened. Clicking a track is a request to *play* it, so a jump now starts
 playback if it is not already running.
-
-### Sidecar rules learned the hard way
-
-M1 took five rounds to get audio out, and every failure was silent. These are
-the specific traps; do not re-introduce them.
-
-- **The API token is origin-locked.** Send `Origin: https://music.apple.com` and
-  a matching `Referer` on every `api.music.apple.com` request. Without them
-  everything 401s no matter how valid the tokens are. A browser sets these
-  automatically, so this bites *only* a native client.
-- **Never invalidate the hook on `did-start-loading`.** It fires for SPA route
-  changes and subresource loads, so it latches `hookReady` to false within
-  seconds and every later command parks in `pending` forever. Use
-  `did-start-navigation` filtered to main-frame, cross-document navigations —
-  that is what actually replaces a preload context.
-- **Never queue a command silently.** Parking one emits `cmd-queued`. A queued
-  command and a dropped one are indistinguishable otherwise, and that ambiguity
-  cost three debugging rounds.
-- **`refreshTokens` bypasses `dispatch()`.** It is sent by `main.js` straight to
-  the renderer, so it proves the renderer is alive and proves *nothing* about
-  the Rust→sidecar path. Do not read it as evidence that commands are arriving.
-- **MusicKit's queue position is signed.** It reports `-1` between `setQueue`
-  and the first item becoming current. Use `Queue::index()`.
-- **Timers in `main.js` must be module-level and cleared before re-arming.** The
-  probe re-arms on every navigation; `const` locals shadowed the handles and
-  leaked a nudger per navigation.
-- **The window is genuinely unmapped (`WINDOW_MODE=hidden`), and that is
-  verified.** The `--disable-renderer-backgrounding` /
-  `--disable-background-timer-throttling` /
-  `--disable-backgrounding-occluded-windows` switches were already in place when
-  it was verified, so treat them as load-bearing rather than leftovers — pulling
-  them may reintroduce a frozen renderer. `concealed` (mapped, 1x1,
-  transparent) remains as an escape hatch for a compositor that needs it.
-- **The sidecar must not look like a second app.** `app.setName('Slipmat')` plus
-  `app.setDesktopName('dev.miguelrincon.Slipmat.desktop')`, or the shell invents
-  a "slipmat-sidecar" entry with a generic icon.
-- **The sidecar must not publish its own MPRIS player.** Chromium registers one
-  the moment a page plays media, and grabs the hardware media keys with it —
-  giving two identical "Slipmat" entries in the shell and letting an invisible
-  browser win the race for Play/Pause. Disabled via
-  `--disable-features=MediaSessionService,HardwareMediaKeyHandling`. Neither
-  affects decoding. Slipmat owns MPRIS; the sidecar owns audio.
-- **Diagnose by layer, in order:** `cmd-queued` → never dispatched.
-  No `cmd-recv` → renderer never ran it. `cmd-recv` but no `cmd-done` → the
-  command is hanging. `cmd-done` with a full queue but a non-playing state →
-  playback is blocked, not failing.
-- **`unknown-command` means you are running the *installed* sidecar, not the
-  repo's.** `locate()` prefers `$XDG_DATA_HOME` over the build tree, so once
-  anything has been installed to `~/.local/share/slipmat/sidecar`, a debug build
-  runs **fresh Rust against stale JavaScript** — and says nothing about it.
-
-  It fails in the most misleading way available: the command goes out, the
-  optimistic UI updates, a toast says it worked, and only the account it was
-  supposed to change disagrees. An afternoon went into "the removal does not
-  work" before the log line `code=unknown-command detail=removeFromLibrary`
-  was read for what it was.
-
-  Any change under `sidecar/` needs one of:
-
-  ```bash
-  SLIPMAT_SIDECAR=$PWD/sidecar cargo run   # what the repo has, always
-  make install-sidecar                     # or refresh the installed copy
-  ```
-
-  The first is the better habit while developing. Check it in one line:
-  `grep -c yourNewCommand ~/.local/share/slipmat/sidecar/preload.js`.
-- **A second instance never announces itself — it just wins.** relm4 apps are
-  unique by default, so launching while one is already up hands off to the
-  primary and exits **0 with no output**: no window, no log, nothing to
-  suggest what happened. Every later run then exercises the *old* binary.
-
-  Scanning `/proc` for the executable is not reliable — an instance started as
-  `./target/debug/slipmat` whose binary has since been replaced by a rebuild no
-  longer matches. Ask the bus, which is never wrong about who holds the name:
-
-  ```bash
-  busctl --user call org.freedesktop.DBus /org/freedesktop/DBus \
-    org.freedesktop.DBus GetConnectionUnixProcessID s dev.miguelrincon.Slipmat
-  ```
-
-  Both of these are the same trap wearing two costumes: **old code quietly in
-  charge while you test new code.** When a change appears to have no effect,
-  rule this out before doubting the change.
-
-```
-crates/slipmat-core/   # the engine. No toolkit reaches in here.
-  build.rs           # emits SLIPMAT_WORKSPACE_ROOT for the dev-tree sidecar path
-  src/lib.rs
-  src/player/
-    protocol.rs      # serde types for both directions. The whole contract, one file.
-    sidecar.rs       # locate / spawn / supervise the Electron child; NDJSON codec
-    state.rs         # PlayerState: now playing, position, queue *projection* (+ tests)
-  src/music/
-    client.rs        # reqwest → api.music.apple.com; storefront; errors that name the fix
-    types.rs         # Track / Album / Artist / Playlist / Artwork (+ tests). JSON stops here.
-
-crates/slipmat/        # the GTK client. One frontend of several to come.
-  src/
-  main.rs            # RelmApp bootstrap, tracing, icon; locate + spawn the sidecar
-  app/
-    mod.rs           # root Component: AppModel, AppMsg, CommandMsg, update, view!
-    view.rs          # which section is showing; the three encodings of that
-    library.rs       # loading + filtering songs, albums, artists, catalog search
-    queue.rs         # click → setQueue, and healing a queue MusicKit rejected
-    pages.rs         # the album / artist navigation stack
-    playback.rs      # mirrored state → Now Playing bar, MPRIS, notifications
-    supervise.rs     # keeping the sidecar alive; folding in its events
-    status.rs        # what the pane shows when it is not showing music
-    chrome.rs        # the menu, its accelerators, and the three dialogs
-    row_menu.rs      # the per-row context menu, and what each item sends
-    writes.rs        # library writes: the optimistic row change, and taking it back
-  settings.rs        # glib::KeyFile → ~/.config/slipmat/settings.ini. NEVER tokens.
-  session.rs         # what was playing, → $XDG_STATE_HOME/slipmat/session.json
-  library_cache.rs   # the four collections, → ~/.cache/slipmat/library.json
-  style.rs           # accent colour + the cover behind the player. The only CSS.
-  mpris.rs           # mpris-server 0.10 ↔ AppMsg bridge (both directions)
-  notify.rs          # gio::Notification on track change (opt-in)
-  components/
-    mod.rs
-    now_playing.rs   # the persistent bottom bar
-    player_view/
-      mod.rs         # the bar opened out into a drawer: model, view!, reducer
-      transport.rs   # its scrubber and buttons, built by hand because they
-                     # *move* between layouts — a child module so construction
-                     # and refresh cannot land in different files
-    track_row.rs     # FactoryComponent → adw::ActionRow
-    queue_view/
-      mod.rs         # the component: the visible list, which is not the queue
-      row.rs         # a track or the history disclosure; drag, drop, and no
-                     # handler that can go stale
-      reconcile.rs   # the diff, because a rebuild is what loses the scroll (#6)
-      menu.rs        # its own row menu: in a queue, "Play Next" is a *move*
-    library.rs       # playlists / albums / songs
-    cover.rs         # square record or round portrait; one of the two shows
-    artwork.rs       # fetch + disk cache; MPRIS needs a file:// path, and
-                     # the player's backdrop needs a deliberately tiny one
-sidecar/
-  package.json  main.js  preload.js    # ~1200 lines of JS
-data/
-  dev.miguelrincon.Slipmat.desktop
-  icons/hicolor/{scalable,symbolic}/apps/dev.miguelrincon.Slipmat{,-symbolic}.svg
-                       # the PNG sizes are rendered from the SVG by `make install`,
-                       # never committed — two copies of an icon always drift
-Makefile             # make install → ~/.local (no sudo); make sidecar; make check
-```
-
-`app/` is split by **what a thing does**, not by layer, so a change usually
-lands in one file. **A new `impl AppModel` method goes in the sibling
-that owns its concern** — and if none does, that is a new sibling, not another
-method in `mod.rs`. This drifts if it is not watched: `mod.rs` was split once at
-3085 lines and had grown back past 2800 before anyone looked, almost all of it
-helper methods added where the model happened to be. Every sibling is an `impl AppModel` block — legal, and able
-to touch private fields, because a child module can see its parent's. `mod.rs`
-keeps only the three things that have to be in one place: the model, the
-messages, and the `Component` impl holding `view!` and the reducer. The reducer
-stays whole because it is the map from action to work, and a map is only useful
-entire.
-
-Dependency direction is strictly one-way, as in the siblings:
-`main → app → components/*`, and `app → player|music → types`.
-`components/` never imports `reqwest` or `serde_json`.
-
-The root model is roughly:
-
-```rust
-struct AppModel {
-    player: PlayerState,               // mirror of the sidecar (rule 3)
-    conn: SidecarState,                // Starting | AwaitingLogin | Ready | Restarting(u32)
-    tokens: Option<Tokens>,            // developer + music user; never persisted (rule 7)
-    library: FactoryVecDeque<TrackRow>,
-    query: String,
-    mpris: Option<mpris_server::Server<SlipmatPlayer>>,
-    settings: Settings,
-    toast_overlay: adw::ToastOverlay,
-}
-
-enum AppMsg {
-    // user intent
-    PlayPause, Next, Previous, Seek(u64), SetVolume(f64),
-    PlayTrack { queue: Vec<TrackId>, start: usize },   // one setQueue, never per-track
-    JumpTo(usize), SetShuffle(bool), SetRepeat(Repeat),
-    SearchChanged(String), SignIn, SignOut,
-    ShowAbout, ShowPreferences, ShowShortcuts,
-    Error(String),
-}
-
-// Pushed up from the sidecar's stdout, and from HTTP commands.
-enum CommandMsg {
-    SidecarEvent(player::protocol::Event),   // playback state, now playing, queue, tokens
-    SidecarDied(String),                     // → supervised restart (rule 6)
-    LibraryLoaded(Vec<Track>),
-    ArtworkReady(TrackId, PathBuf),          // MPRIS needs file://, so cache to disk
-    LoadFailed(String),
-}
-```
-
-This is Redux with a compiler: actions in, one reducer, view derived from state.
 
 ## UI shape
 
@@ -1067,7 +623,7 @@ engine, the library, catalog search, the queue view and MPRIS are all done and
 verified — the history of how is in the git log and the release notes, which is
 where it belongs rather than in a checklist nobody updates.
 
-See [current architecture and migration reference](#current-architecture-and-migration-reference).
+See [current architecture](#current-architecture).
 
 **Stay lean — flag the drift, don't gatekeep.** Not the default focus: lyrics,
 Discord presence, podcasts, radio, multi-account, an equaliser, scrobbling,
@@ -1203,158 +759,12 @@ ordinary traffic.
 ## Commands
 
 ```bash
-cargo run                                    # dev (expects ./sidecar/node_modules)
-RUST_LOG=slipmat=debug cargo run             # traces the NDJSON protocol both ways
-make sidecar                                 # npm install castLabs Electron (~200 MB)
-                                             # — `make install` already does this
-make sidecar-run                             # sidecar alone, window VISIBLE — isolates DRM bugs
-make gapless                                 # watch the audio stream across a track boundary
-cargo clippy --all-targets -- -D warnings    # the bar, before any commit
-make check                                   # sizes + fmt + clippy + test
+sh scripts/fairplay-trial/prepare.sh  # build and register the native provider
+cargo build --locked --workspace
+target/debug/slipmat
+target/debug/climat
+make check
 ```
-
-System deps (CachyOS / Arch):
-
-```bash
-sudo pacman -S --needed base-devel pkgconf rust gtk4 libadwaita librsvg nodejs npm
-# A keyring provider must be running for oo7 (gnome-keyring is default on GNOME).
-# playerctl is handy for testing MPRIS.
-```
-
-Two gotchas around installing the sidecar, both of which fail confusingly:
-
-- **`sidecar/.npmrc` is load-bearing — do not delete it.** npm 12 disables
-  git-type dependencies by default, and castLabs Electron ships only as a GitHub
-  release. Without `allow-git=root` you get `EALLOWGIT`. It must live in
-  `sidecar/`, not the repo root: npm reads the project `.npmrc` from the
-  directory holding the `package.json` it is installing.
-- **`npm install` alone is not enough.** castLabs ships **no postinstall hook**
-  — the ~200 MB Chromium is fetched by an explicit
-  `node node_modules/electron/install.js`. Skip it and you get a 14 MB
-  `node_modules` with no binary, and the failure only surfaces later as
-  "Electron not installed". `make sidecar` runs both steps.
-
-### Gapless — verified 2026-07-30
-
-**It works.** Measured on *A Thousand Suns (Deluxe)*, seven consecutive
-boundaries, with the **queue drawer open and the history collapsed** — so a
-store splice landed at every one of them:
-
-- PipeWire sink-input **#39600 was created once, at the first play, and was
-  still alive after all seven boundaries.** The decoder never stopped. That is
-  the half you cannot hear and cannot infer, and it is the whole result.
-- `left_ms=0` on every transition, and wall-clock matched each track's length to
-  the second — including the two interludes, *Empty Spaces* at 20s and *Jornada
-  Del Muerto* at 95s. Every track ran out rather than being cut short.
-- Every boundary spliced the queue rows (`remove=2 insert=1` once the disclosure
-  is re-labelling) and none of it disturbed playback. The reconcile is minimal:
-  it touches the head and nothing else.
-- The listener heard no gap.
-
-**That run also found the check itself broken, which #121 fixed.** Every
-transition logged `prompted_by="syncQueuePosition"` instead of
-`"nothing — MusicKit advanced itself"`: MusicKit pre-advances its own
-`queue.position` a few hundred milliseconds before a boundary, we read that as a
-disagreement and put it back, and a command therefore always landed inside the
-window `log_transition` looks over. The string was unreachable, so the rule 3
-check could not fail: the day Rust really did start driving the queue, the log
-would have looked identical.
-
-**And it was audible.** This was first written up as harmless — the transitions
-logged `left_ms=0` and the PipeWire stream never went away, so both instruments
-said nothing was wrong. Neither of them can hear a transition, and the listener
-could. *Absence of evidence in the two logs is not evidence*: they were built to
-answer "did the decoder stop", and "does the boundary sound right" is a third
-question that only ears answer. That is why the procedure below ends with them.
-
-Settling now happens only when the sidecar says the *items* changed. Re-verified
-the same day, and **the pair is the point**:
-
-```text
-4 boundaries      prompted_by="nothing — MusicKit advanced itself"   0 settles
-2 removals from
-above the current  telling MusicKit ... index=3, then index=2        2 settles
-```
-
-**Check the pair, never the silence alone.** A sidecar too old to send a reason
-produces exactly the same silence at a boundary — the default is "do not settle"
-— so a pass on the transition line by itself is also what a stale sidecar looks
-like. The removal is what tells them apart, and it has to be from *above* the
-current track: removing from below shifts no index and correctly settles nothing.
-
-The first verification, on 2026-07-26, was four boundaries with the drawer shut.
-It predates `syncQueuePosition` entirely.
-
-Two things that run cost, both now fixed, both worth not re-learning:
-
-- **The two logs are on different clocks.** `tracing` prints UTC, the script
-  printed local time. A `remove` two hours adrift looked like a gap at a
-  boundary and was in fact a screenshot shutter. The script now prints the
-  offset, and only reports Slipmat's *own* stream — any notification sound
-  opens and closes a stream of its own, and reporting those made the whole
-  instrument untrustworthy.
-- **`left_ms` was sampled at the wrong moment.** Read live when
-  `nowPlayingItemDidChange` arrives, MusicKit has usually already zeroed the
-  position — but not always, so it read as the full duration on three
-  boundaries and zero on the fourth, purely on which event won the race. It is
-  a high-water mark now.
-
-### Verifying gapless
-
-The headline feature, and the one that fails silently. It has two halves, and
-they fail for different reasons:
-
-| Half | How it breaks | How to see it |
-| --- | --- | --- |
-| Rust must not drive the queue | feeding tracks one at a time (rule 3) | the `track transition` log line |
-| the decoder must not stop | MusicKit re-buffering at the boundary | the PipeWire stream disappearing |
-
-```bash
-make gapless                                  # terminal 1: watch the audio stream
-RUST_LOG=slipmat=info cargo run               # terminal 2: watch the transitions
-```
-
-Queue an album with a **true** gapless transition — a live record, a DJ mix,
-something segued — and let it run across the boundary. **Open the queue drawer
-and leave the history collapsed**: that is the configuration where every
-boundary also edits the list, and leaving the drawer shut tests the cheap path.
-`RUST_LOG=slipmat=debug` adds the `queue:` lines so both are on one clock.
-
-Then check all three:
-
-1. **The log.** Every boundary prints a `track transition` line, and a natural
-   one has `left_ms` near zero and reads
-   `prompted_by="nothing — MusicKit advanced itself"`. If it names a command on
-   a track that ran to its end, Rust is driving the queue and rule 3 is broken.
-
-   **Then remove a track from above the current one and watch it settle.** That
-   silence is only evidence when its opposite still works: a sidecar too old to
-   report *why* the queue changed defaults to never settling, and produces the
-   same quiet boundary as a healthy one. `telling MusicKit where the current
-   track is` must fire for the removal (#121, #117).
-2. **The stream.** `make gapless` should print *nothing* at the boundary. A
-   `remove` followed by a `new` is a torn-down decoder, which is audible no
-   matter what the log says.
-3. **Your ears.** Neither of the above can hear a 20 ms hiccup. They tell you
-   *where* a gap came from, not whether there was one.
-
-`left_ms` is also how you tell a boundary from a skip: a skip leaves seconds on
-the clock, a boundary leaves almost none.
-
-Debugging, in order — always isolate the layer first:
-
-0. **Is the code you changed the code that is running?** Two ways it is not,
-   both silent, both in the sidecar rules above: an *installed* sidecar
-   shadowing the repo's, and a *second instance* handing off to one already
-   running. Rule these out before doubting the change — they cost more time
-   than anything else on this list.
-1. `make sidecar-run` — if a track won't play with the window visible, it's DRM
-   or Apple, not Rust. (Uses `SLIPMAT_SHOW_SIDECAR=1`; `--debug` never reached
-   the app, Electron eats it as Node's deprecated flag.)
-2. `RUST_LOG=slipmat=debug cargo run` — watch the NDJSON both ways.
-3. `playerctl -p Slipmat metadata` / `busctl --user introspect
-   org.mpris.MediaPlayer2.Slipmat /org/mpris/MediaPlayer2` — the MPRIS surface.
-4. `pavucontrol` — confirm the stream exists and is named Slipmat.
 
 ## Conventions
 
@@ -1378,8 +788,6 @@ Debugging, in order — always isolate the layer first:
   then set `main` back to the next `-dev`. There is no CHANGELOG — the release
   notes are written from the merged PRs, which is where the reasoning already
   is.
-- `sidecar/node_modules` is **never** committed — it is ~200 MB of Chromium,
-  fetched by `make sidecar`.
 
 ### Comments
 

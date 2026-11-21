@@ -84,7 +84,6 @@ mod status;
 mod supervise;
 mod view;
 mod wiring;
-mod writes;
 
 use chrome::{icon, register_actions, show_about, show_shortcuts};
 use supervise::connect;
@@ -450,19 +449,6 @@ pub enum AppMsg {
     /// Narrow the catalog search to one kind of result, or widen it again.
     SetCatalogFilter(CatalogFilter),
     ToggleSortDirection,
-    /// Take a song out of the library. Needs the **library** id; the catalog
-    /// id is only carried so the row can be updated locally.
-    RemoveFromLibrary {
-        library_id: String,
-        catalog_id: String,
-    },
-    /// Un-star a song, and nothing else. Deliberately does **not** also remove
-    /// it from the library: favouriting adds it, un-favouriting does not take
-    /// it back out, and that is what Apple's own client does. Chaining the two
-    /// would silently delete a song someone only meant to un-star.
-    Unfavorite {
-        catalog_id: String,
-    },
     /// The window's close button, or the WM. Not a quit: see the handler.
     WindowCloseRequested,
     /// The window is on screen again, however that happened.
@@ -1779,9 +1765,6 @@ impl AppModel {
             }
             AppMsg::SignOutConfirmed => {
                 tracing::info!("signing out");
-                // The sidecar drops Apple's session — cookies and all, not just
-                // MusicKit's token — and its `authorizationStatusDidChange`
-                // confirms it rather than us assuming.
                 self.ask(Request::SignOut);
             }
             AppMsg::PlayPause => self.transport(Transport::PlayPause),
@@ -2276,44 +2259,12 @@ impl AppModel {
                     tracing::info!("window shown; no longer background-only");
                 }
             }
-            AppMsg::RemoveFromLibrary {
-                library_id,
-                catalog_id,
-            } => {
-                tracing::info!(%library_id, "removing from library");
-                self.ask(Request::Write {
-                    action: WriteAction::RemoveFromLibrary,
-                    id: library_id,
-                });
-                // Mirrored locally for the same reason the star is: the menu
-                // reads this, and making someone reload to see their own click
-                // is absurd. `include=library` is cached for tens of seconds
-                // besides, so a read-back would disagree for a while (#34).
-                self.set_in_library(&catalog_id, false);
-                self.toast("Removing from your library…");
-            }
-            AppMsg::Unfavorite { catalog_id } => {
-                tracing::info!(%catalog_id, "removing favourite");
-                self.ask(Request::Write {
-                    action: WriteAction::Unfavorite,
-                    id: catalog_id.clone(),
-                });
-                // The star only. The song stays in the library — see the note
-                // on `AppMsg::Unfavorite`.
-                self.set_favorite(&catalog_id, false);
-                // Present continuous, not a claim: nothing has been confirmed
-                // yet, and `undo_pending_write` is what happens if it is not.
-                self.toast("Removing favourite…");
-            }
             AppMsg::LibraryWrite { catalog_id, action } => {
                 // Said out loud before the request goes out: these are
                 // fire-and-forget, and a click with no feedback at all reads as
                 // a click that did not register.
                 self.toast(action.sent());
                 tracing::info!(?action, "library write");
-                // The daemon decides whether this goes over REST or through
-                // MusicKit — only it can do the second, and only it has the
-                // tokens for the first.
                 self.ask(Request::Write {
                     action: match action {
                         LibraryAction::Favorite => WriteAction::Favorite,

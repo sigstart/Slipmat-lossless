@@ -2,11 +2,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Staying connected to the daemon, and folding in what it says.
-//!
-//! This file used to supervise a child process. It does not any more: the
-//! daemon owns the sidecar, because the Chromium profile lock says exactly one
-//! process may. What is left is a socket that can go away — which is a smaller
-//! problem, since reconnecting costs a connect rather than a Widevine boot.
 
 use relm4::{ComponentController, ComponentSender, adw};
 
@@ -17,9 +12,6 @@ use slipmat_core::ipc::{Event, Request, Stage as DaemonStage, Transport};
 
 /// How long to wait before dialling again, per consecutive failure.
 ///
-/// Shorter than the sidecar's backoff was, because there is no Chromium to boot
-/// — a daemon that is coming up is listening within a fraction of a second, and
-/// one that will not start is not helped by waiting longer.
 fn redial_delay(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_millis(200 * (1 << attempt.min(5)) as u64)
 }
@@ -34,10 +26,6 @@ pub(super) fn connect(sender: &ComponentSender<AppModel>) {
 
 /// Connect after `delay` and stream the daemon's events for as long as it lasts.
 ///
-/// A **streaming** command, not a `oneshot_command`: the receiver stays alive
-/// for the whole session, which is the one case CLAUDE.md reserves `command`
-/// for. `drop_on_shutdown` no longer guards against an orphaned Chromium — the
-/// daemon owns that — but it still stops a dead window holding a socket.
 pub(super) fn reconnect(sender: &ComponentSender<AppModel>, delay: std::time::Duration) {
     sender.command(move |out, shutdown| {
         shutdown

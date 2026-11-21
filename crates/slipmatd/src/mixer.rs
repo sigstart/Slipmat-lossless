@@ -7,7 +7,7 @@
 //! left two independent gains for one application: Slipmat's slider said 50%
 //! while the system mixer said 100%, they multiplied, and only one of them was
 //! where a Linux user goes to look. This drives the *stream* instead — the
-//! sink-input the sidecar is playing through — so Slipmat's volume and the one
+//! sink-input the native player is using — so Slipmat's volume and the one
 //! in the desktop's audio panel are the same number.
 //!
 //! **Persistence is the audio server's job, not ours.** The stream disappears
@@ -26,8 +26,7 @@ use libpulse_binding::context::{Context, FlagSet, State};
 use libpulse_binding::mainloop::standard::{IterateResult, Mainloop};
 use libpulse_binding::volume::{ChannelVolumes, Volume};
 
-/// What the sidecar calls itself to the audio server — `app.setName('Slipmat')`
-/// in `main.js`, which is also what the desktop's mixer labels the stream.
+/// The application name set by the native audio output.
 const STREAM: &str = "Slipmat";
 
 enum Ask {

@@ -4,11 +4,6 @@
 # lands under ~/.local, which is already on PATH and XDG_DATA_DIRS. Override
 # PREFIX for a system install (make PREFIX=/usr/local install, with sudo).
 #
-# Unlike its siblings, Slipmat installs a *second* artefact: the Electron
-# sidecar that owns DRM playback. It is ~200 MB of Chromium and is fetched by
-# npm, never committed. The binary finds it via SLIPMAT_SIDECAR, else
-# $(DATADIR)/slipmat/sidecar, else ./sidecar for a dev tree.
-
 PREFIX  ?= $(HOME)/.local
 BINDIR   = $(PREFIX)/bin
 DATADIR  = $(PREFIX)/share
@@ -16,11 +11,10 @@ APPID    = dev.miguelrincon.Slipmat
 # climat has an id of its own because it is a separate program with a separate
 # entry — a terminal one, launched by the desktop into a terminal.
 CLIMAT   = dev.miguelrincon.Climat
-SIDECAR  = $(DATADIR)/slipmat/sidecar
 
 ICON_SIZES = 16 32 48 64 128 256 512
 
-.PHONY: all build run test check sidecar sidecar-run gapless footprint install install-sidecar \
+.PHONY: all build run test check gapless footprint install \
         dev-install uninstall clean flatpak flatpak-bundle aur aur-publish
 all: build
 
@@ -41,22 +35,7 @@ check:
 	# Keep the fast packaging checks local even though CI also builds bundles.
 	# They catch stale sources and architecture drift before a seven-minute job.
 	python3 packaging/flatpak/check-sources.py
-	python3 packaging/flatpak/check-electron-shim.py
 	python3 packaging/check-architectures.py
-
-# Fetch castLabs Electron. Two steps, both required: `npm install` brings down
-# the ~14 MB wrapper, and install.js fetches the ~200 MB Chromium itself.
-# castLabs ships no postinstall hook, so skipping the second step leaves you
-# with a package that has no binary in it.
-# (The Widevine CDM itself arrives later, at first run, via Chromium's
-# component updater — that needs network too.)
-sidecar:
-	cd sidecar && npm install && node node_modules/electron/install.js
-
-# Run the sidecar standalone with its window visible — the isolation step from
-# CLAUDE.md. If a track plays here, DRM is fine and the bug is in the Rust side.
-sidecar-run: sidecar
-	cd sidecar && npm run debug
 
 # Watch the audio stream across a track boundary. Run it in one terminal and
 # `RUST_LOG=slipmat=info cargo run` in another — the log says whether Rust
@@ -81,7 +60,6 @@ FLATPAK_ARCH ?= $(shell uname -m)
 flatpak:
 	$(FLATPAK_BUILDER) --arch=$(FLATPAK_ARCH) --force-clean --user --install \
 		--repo=flatpak-repo build-dir packaging/flatpak/dev.miguelrincon.Slipmat.yml
-	test -f build-dir/files/share/slipmat/sidecar/queue-identity.js
 
 # `--runtime-repo` is the difference between a bundle that installs and one
 # that stops because the matching GNOME runtime was not found. A .flatpak
@@ -103,26 +81,18 @@ flatpak-bundle: flatpak
 # is the same thing with --push. Deliberately local rather than a CI job: the
 # key that can publish under your name should not live in a repository secret.
 aur:
-	./scripts/aur-publish.sh slipmat
 	./scripts/aur-publish.sh slipmat-git
 
 aur-publish:
-	./scripts/aur-publish.sh slipmat --push
 	./scripts/aur-publish.sh slipmat-git --push
 
-install: build install-sidecar dev-install
+install: build dev-install
 	install -Dm755 target/release/slipmat $(BINDIR)/slipmat
 	install -Dm755 target/release/slipmatd $(BINDIR)/slipmatd
 	install -Dm755 target/release/climat $(BINDIR)/climat
 	install -Dm644 packaging/systemd/slipmatd.service \
 		$(DATADIR)/systemd/user/slipmatd.service
 	@echo "Installed to $(PREFIX). Launch 'Slipmat' from the app grid, or run 'slipmat' — or 'climat' for the terminal."
-
-install-sidecar: sidecar
-	install -d $(SIDECAR)
-	cp -r sidecar/package.json sidecar/main.js sidecar/preload.js \
-		sidecar/queue-identity.js \
-		sidecar/node_modules $(SIDECAR)/
 
 # Everything except the binaries: the .desktop entry and the icons.
 # Not a way to get a dev-mode icon — on Wayland only the fully installed app
@@ -162,6 +132,7 @@ dev-install:
 
 uninstall:
 	rm -f $(BINDIR)/slipmat
+	rm -f $(BINDIR)/slipmatd
 	rm -f $(BINDIR)/climat
 	rm -rf $(DATADIR)/slipmat
 	rm -f $(DATADIR)/applications/$(APPID).desktop
@@ -181,4 +152,3 @@ uninstall:
 
 clean:
 	cargo clean
-	rm -rf sidecar/node_modules

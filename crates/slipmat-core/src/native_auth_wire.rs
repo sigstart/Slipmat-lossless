@@ -12,6 +12,18 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::UnixStream;
 use zeroize::{Zeroize, Zeroizing};
 
+/// The provider pipe can carry credentials. Client sockets use only `Reply`.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+pub enum ProviderReply {
+    Catalogue {
+        #[serde(rename = "type")]
+        kind: String,
+        catalogue: crate::player::protocol::Tokens,
+    },
+    Plain(crate::native_auth::Reply),
+}
+
 const MAX_FRAME: usize = 8192;
 
 #[derive(Serialize)]

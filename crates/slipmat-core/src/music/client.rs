@@ -3,13 +3,8 @@
 
 //! Thin async wrapper over `api.music.apple.com`.
 //!
-//! Both tokens come from the sidecar (CLAUDE.md rule 7) — the developer token
-//! as a bearer, the Music User Token in `Music-User-Token`. Neither is ever
-//! logged or persisted to the config file.
-//!
-//! M5 fills in the library and catalog calls. What exists now is the client
-//! itself plus the error diagnosis, because "errors name the fix" is easier to
-//! honour if it's there from the first request rather than retrofitted.
+//! The native provider supplies both tokens. The developer token authenticates
+//! the request and the Music User Token authorizes account access.
 
 use anyhow::{Context, Result};
 use reqwest::{Client as HttpClient, StatusCode};
@@ -35,9 +30,6 @@ pub struct SearchResults {
 }
 
 const API_BASE: &str = "https://api.music.apple.com/v1";
-/// The origin the harvested developer token is minted for — see `get()`.
-const WEB_ORIGIN: &str = "https://music.apple.com";
-const WEB_REFERER: &str = "https://music.apple.com/";
 /// A playlist long enough to hit this is a playlist nobody scrolls. Bounded so
 /// one enormous one cannot spin through fifty requests.
 const PLAYLIST_MAX: usize = 1_000;
@@ -78,16 +70,26 @@ pub enum ApiError {
 }
 
 impl Client {
-    pub fn new(
+    pub fn native(
         developer_token: String,
-        music_user_token: Option<String>,
+        music_user_token: String,
         storefront: String,
-    ) -> Self {
-        Self {
-            http: HttpClient::new(),
+    ) -> reqwest::Result<Self> {
+        Ok(Self {
+            http: HttpClient::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()?,
             developer_token,
-            music_user_token,
+            music_user_token: Some(music_user_token),
             storefront,
+        })
+    }
+
+    fn authorize(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let request = request.bearer_auth(&self.developer_token);
+        match &self.music_user_token {
+            Some(token) => request.header("Music-User-Token", token.as_str()),
+            None => request,
         }
     }
 
@@ -96,55 +98,19 @@ impl Client {
     }
 
     fn get(&self, path: &str) -> reqwest::RequestBuilder {
-        let req = self
-            .http
-            .get(format!("{API_BASE}{path}"))
-            .bearer_auth(&self.developer_token)
-            // The harvested developer token is ORIGIN-LOCKED. Its JWT payload
-            // carries `"root_https_origin": ["apple.com"]`, and the API
-            // enforces it: without these two headers every request comes back
-            // 401 even with a perfectly valid token and user token. A browser
-            // sets them automatically, which is why this only bites a native
-            // client. Do not remove them.
-            .header("Origin", WEB_ORIGIN)
-            .header("Referer", WEB_REFERER);
-        match &self.music_user_token {
-            Some(t) => req.header("Music-User-Token", t.as_str()),
-            None => req,
-        }
+        self.authorize(self.http.get(format!("{API_BASE}{path}")))
     }
 
-    /// As [`Client::get`], for the endpoints that write. Same origin-locked
-    /// headers — they are enforced on every method, not just reads — and the
-    /// user token is not optional here: every write is on behalf of a person.
     fn post(&self, path: &str) -> reqwest::RequestBuilder {
-        let req = self
-            .http
-            .post(format!("{API_BASE}{path}"))
-            .bearer_auth(&self.developer_token)
-            .header("Origin", WEB_ORIGIN)
-            .header("Referer", WEB_REFERER)
-            // Apple rejects a POST with no body outright; an empty JSON object
-            // is the smallest thing it accepts.
-            .header("Content-Length", "0");
-        match &self.music_user_token {
-            Some(t) => req.header("Music-User-Token", t.as_str()),
-            None => req,
-        }
+        self.authorize(
+            self.http
+                .post(format!("{API_BASE}{path}"))
+                .header("Content-Length", "0"),
+        )
     }
 
-    /// As [`Client::post`], for the one write that removes something.
     fn delete(&self, path: &str) -> reqwest::RequestBuilder {
-        let req = self
-            .http
-            .delete(format!("{API_BASE}{path}"))
-            .bearer_auth(&self.developer_token)
-            .header("Origin", WEB_ORIGIN)
-            .header("Referer", WEB_REFERER);
-        match &self.music_user_token {
-            Some(t) => req.header("Music-User-Token", t.as_str()),
-            None => req,
-        }
+        self.authorize(self.http.delete(format!("{API_BASE}{path}")))
     }
 
     /// Map a response status to something the UI can act on.
@@ -968,6 +934,21 @@ fn artist_albums_of(resource: &ArtistResource) -> Vec<Album> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_library_writes_use_account_headers_without_a_web_origin() {
+        let client =
+            Client::native("test-developer".into(), "test-user".into(), "us".into()).unwrap();
+        for path in ["/me/library?ids[songs]=123", "/me/favorites?ids[songs]=123"] {
+            let request = client.post(path).build().unwrap();
+            assert_eq!(request.method(), reqwest::Method::POST);
+            assert_eq!(request.url().host_str(), Some("api.music.apple.com"));
+            assert_eq!(request.headers()["authorization"], "Bearer test-developer");
+            assert_eq!(request.headers()["music-user-token"], "test-user");
+            assert!(!request.headers().contains_key("origin"));
+            assert!(!request.headers().contains_key("referer"));
+        }
+    }
 
     #[test]
     fn search_results_are_nested_differently_to_every_other_endpoint() {

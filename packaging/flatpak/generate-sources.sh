@@ -4,9 +4,7 @@
 # `flatpak-builder` forbids network access during a build, so every crate has
 # to be declared up front with a hash. This turns Cargo.lock into that list.
 #
-# Run it whenever Cargo.lock changes. There is no npm equivalent to generate:
-# the sidecar's only dependency is Electron itself, pinned as an archive in the
-# manifest, and nothing in the npm tree is needed at runtime.
+# Run it whenever Cargo.lock changes.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"

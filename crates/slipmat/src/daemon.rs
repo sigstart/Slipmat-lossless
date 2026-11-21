@@ -1,15 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Miguel Rincon
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Talking to `slipmatd`.
-//!
-//! **The client does not own a sidecar any more.** One process holds the
-//! Chromium — the profile lock says so — and this app is one of its clients.
-//! What used to be a command down a pipe is now a request over a socket, and
-//! what used to be a MusicKit event is now the daemon's own snapshot.
-//!
-//! The daemon is started here if it is not running: Slipmat is an app somebody
-//! opens, not a service they enable.
+//! Connection to the shared Slipmat daemon.
 
 use std::path::PathBuf;
 

@@ -144,7 +144,7 @@ func (w *wire) restoreProbe() int {
 		var regions struct{ Data []struct{ ID string } }
 		if err == nil && musicJSON(ctx, musicClient, musicAPI+"/me/storefront", account.DevToken, account.MusicToken, &regions) == http.StatusOK &&
 			len(regions.Data) == 1 && storefrontCode(regions.Data[0].ID) {
-			_ = w.output.Encode(result{Type: "signedIn"})
+			_ = w.signedIn(account, regions.Data[0].ID)
 			if w.playTracks(func(ctx context.Context, track string, control *playbackControl, report func(result)) result {
 				return play(ctx, backend, track, control, report)
 			}) {
@@ -207,11 +207,39 @@ func (w *wire) signInAndPlay() bool {
 		return false
 	}
 	defer backend.Stop()
-	if w.output.Encode(result{Type: "signedIn"}) != nil {
+	account, err := nativeAccount()
+	storefront := ""
+	if err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		var regions struct{ Data []struct{ ID string } }
+		if musicJSON(ctx, musicClient, musicAPI+"/me/storefront", account.DevToken, account.MusicToken, &regions) == http.StatusOK &&
+			len(regions.Data) == 1 && storefrontCode(regions.Data[0].ID) {
+			storefront = regions.Data[0].ID
+		}
+	}
+	if w.signedIn(account, storefront) != nil {
 		return false
 	}
 	return w.playTracks(func(ctx context.Context, track string, control *playbackControl, report func(result)) result {
 		return play(ctx, backend, track, control, report)
+	})
+}
+
+// Credentials travel only over the private provider pipe.
+func (w *wire) signedIn(account drm.AccountInfo, storefront string) error {
+	if !storefrontCode(storefront) {
+		_ = w.output.Encode(result{Type: "failed"})
+		return errors.New("native catalogue authorization unavailable")
+	}
+	return w.output.Encode(map[string]any{
+		"type": "signedIn",
+		"catalogue": map[string]any{
+			"developerToken": account.DevToken,
+			"musicUserToken": account.MusicToken,
+			"storefront":     storefront,
+			"authorized":     true,
+		},
 	})
 }
 

@@ -35,7 +35,7 @@ if os.geteuid() == 0:
         for name in ("BUILDDIR", "PKGDEST", "SRCDEST", "SRCPKGDEST", "LOGDEST")
     }
 
-for package in ("slipmat", "slipmat-git"):
+for package in ("slipmat-git",):
     result = subprocess.run(
         makepkg,
         cwd=root / "packaging" / "aur" / package,
@@ -45,8 +45,8 @@ for package in ("slipmat", "slipmat-git"):
     )
     if result.returncode:
         failures.append(f"{package}: metadata generation failed: {result.stderr.strip()}")
-    elif "\tarch = aarch64" not in result.stdout:
-        failures.append(f"{package}: generated metadata does not support aarch64")
+    elif "\tarch = x86_64" not in result.stdout or "\tarch = aarch64" in result.stdout:
+        failures.append(f"{package}: native provider currently supports x86_64 only")
 
 if failures:
     print("Packaging architecture contract failed:")

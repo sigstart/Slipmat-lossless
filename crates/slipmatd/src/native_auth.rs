@@ -69,6 +69,7 @@ impl Endpoint {
             provider,
             storage,
             session: RefCell::new(Session::SignedOut),
+            catalogue: RefCell::new(None),
             attempt_timeout: ATTEMPT_TIMEOUT,
         });
         let task = tokio::task::spawn_local(serve(listener, service.clone()));
@@ -223,6 +224,7 @@ pub struct Service {
     provider: PathBuf,
     storage: Option<SessionStorage>,
     session: RefCell<Session>,
+    catalogue: RefCell<Option<slipmat_core::player::protocol::Tokens>>,
     attempt_timeout: Duration,
 }
 
@@ -250,6 +252,15 @@ enum Trial {
 }
 
 impl Service {
+    pub fn catalogue(&self) -> Option<slipmat_core::player::protocol::Tokens> {
+        if self.is_signed_in() {
+            self.catalogue.borrow().clone()
+        } else {
+            self.catalogue.borrow_mut().take();
+            None
+        }
+    }
+
     async fn restore(&self) {
         let reservation = Reservation(&self.session);
         if let Ok(mut provider) =
@@ -260,6 +271,7 @@ impl Service {
             )
             && matches!(provider.child.try_wait(), Ok(None))
         {
+            self.catalogue.replace(provider.catalogue.take());
             self.session.replace(Session::SignedIn(Box::new(provider)));
             tracing::info!("restored native Apple Music session");
             return;
@@ -303,7 +315,7 @@ impl Service {
         }
     }
 
-    async fn sign_out(&self) -> Reply {
+    pub(crate) async fn sign_out(&self) -> Reply {
         self.reap_provider();
         if matches!(*self.session.borrow(), Session::Busy) {
             return Reply::Busy;
@@ -421,6 +433,7 @@ impl Service {
             } else if send_before(write, Reply::SignedIn, deadline).await.is_err() {
                 End::Disconnected
             } else {
+                self.catalogue.replace(provider.catalogue.take());
                 *self.session.borrow_mut() = Session::SignedIn(Box::new(provider));
                 return End::SignedIn;
             };
@@ -543,6 +556,7 @@ enum End {
 }
 
 struct Provider {
+    catalogue: Option<slipmat_core::player::protocol::Tokens>,
     runtime_profile: Option<PathBuf>,
     child: Child,
     input: ChildStdin,
@@ -612,6 +626,7 @@ impl Provider {
         let input = child.stdin.take().ok_or_else(missing_pipe)?;
         let output = Reader::new(child.stdout.take().ok_or_else(missing_pipe)?);
         Ok(Self {
+            catalogue: None,
             runtime_profile: storage.map(|storage| storage.runtime.clone()),
             child,
             input,
@@ -641,7 +656,31 @@ impl Provider {
 
     async fn exchange(&mut self, request: Request) -> io::Result<Option<Reply>> {
         wire::write(&mut self.input, request).await?;
-        self.output.frame().await
+        match self.output.frame::<wire::ProviderReply>().await? {
+            Some(wire::ProviderReply::Catalogue { kind, catalogue })
+                if kind == "signedIn"
+                    && catalogue.authorized
+                    && !catalogue.developer_token.is_empty()
+                    && catalogue
+                        .music_user_token
+                        .as_ref()
+                        .is_some_and(|token| !token.is_empty())
+                    && catalogue.storefront.len() == 2
+                    && catalogue
+                        .storefront
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase()) =>
+            {
+                self.catalogue = Some(catalogue);
+                Ok(Some(Reply::SignedIn))
+            }
+            Some(wire::ProviderReply::Plain(reply)) => Ok(Some(reply)),
+            Some(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid provider reply",
+            )),
+            None => Ok(None),
+        }
     }
 
     async fn play_track(
@@ -843,6 +882,7 @@ mod tests {
                 .join("tests/fixtures/native-auth-provider"),
             storage: None,
             session: RefCell::new(Session::SignedOut),
+            catalogue: RefCell::new(None),
             attempt_timeout,
         })
     }
@@ -920,6 +960,7 @@ mod tests {
                     .unwrap();
                 let provider_pid = worker.id().unwrap();
                 let provider = Provider {
+                    catalogue: None,
                     runtime_profile: None,
                     input: worker.stdin.take().unwrap(),
                     output: Reader::new(worker.stdout.take().unwrap()),
@@ -1124,9 +1165,13 @@ mod tests {
                 };
                 assert_eq!(other.exchange(verification()).await, Reply::Rejected);
                 assert_eq!(initiator.exchange(verification()).await, Reply::SignedIn);
+                let tokens = service.catalogue().unwrap();
+                assert_eq!(tokens.developer_token, "fixture-developer");
+                assert_eq!(tokens.music_user_token.as_deref(), Some("fixture-user"));
                 drop(initiator);
                 assert_eq!(other.exchange(Request::Status).await, Reply::SignedIn);
                 assert_eq!(other.exchange(Request::SignOut).await, Reply::SignedOut);
+                assert!(service.catalogue().is_none());
                 assert_eq!(other.exchange(Request::Status).await, Reply::SignedOut);
             })
             .await;

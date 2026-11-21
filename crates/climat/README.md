@@ -39,13 +39,10 @@ and a window open at once are two views of one player rather than two players.
 
 ## First run
 
-Run CLImat in a Wayland or X11 session for library browsing. When CLImat
-shows `[Enter] Sign in to Apple Music`, press Enter to open the web library
-sign-in window. Finish signing in and the daemon loads your library.
-
-In source builds, the normal Play action and queue use the shared native
-FairPlay and Symphonia backend. Prepare the provider before starting the daemon
-using the [source setup instructions](../../README.md#development).
+Prepare the x86-64 provider using the [source setup instructions](../../README.md#development).
+Run `climat sign-in` to sign in to the shared Apple Music session. The daemon
+loads your library after sign-in. In the browser pane, use `R` to refresh,
+`Shift+A` to add the selected song, and `Shift+F` to favourite it.
 
 ### Native authentication commands
 

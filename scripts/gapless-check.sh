@@ -2,27 +2,8 @@
 # SPDX-FileCopyrightText: 2026 Miguel Rincon
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Watch the sidecar's audio stream across a track boundary.
-#
-# Gapless has two halves and this measures the one your ears cannot.
-#
-#   1. Rust must not drive the queue. `RUST_LOG=slipmat=info` prints a
-#      "track transition" line at every boundary saying what prompted it.
-#      A natural boundary must read `prompted_by="nothing — MusicKit
-#      advanced itself"`. Anything else means Rust is feeding tracks one at
-#      a time and rule 3 is broken.
-#
-#   2. The decoder must not stop. That is this script. If the PipeWire
-#      stream is torn down and rebuilt at the boundary, there is a gap no
-#      matter what the log says — you will see `removed` then `new`.
-#      A gapless transition keeps one stream alive throughout.
-#
-# Neither replaces listening. Both tell you *where* a gap came from.
-#
-# NOTE ON CLOCKS: the timestamps below are local time; `tracing` logs UTC.
-# The header prints the offset so the two logs can be lined up — the first
-# run of this script cost a few minutes to working out that a "gap" two
-# hours adrift was in fact a screenshot shutter.
+# Watch Slipmat's audio stream across a track boundary. A gapless handoff
+# keeps the same stream alive. The current native player opens one per track.
 
 set -uo pipefail
 
@@ -31,14 +12,7 @@ if ! command -v pactl >/dev/null; then
 	exit 1
 fi
 
-# Which sink-input belongs to Slipmat. Matched on any property containing the
-# name, because Chromium spreads it across application.name,
-# application.process.binary and media.name depending on the version — and
-# `app.setName('Slipmat')` in sidecar/main.js is what puts it there at all.
-#
-# This filter is the point: a notification sound or a screenshot shutter opens
-# and closes its own short-lived stream, and reporting those as gaps makes the
-# whole instrument untrustworthy.
+# Ignore notification sounds and other applications' streams.
 slipmat_indices() {
 	pactl list sink-inputs 2>/dev/null | awk '
 		/^Sink Input #/ { idx = substr($3, 2); hit = 0 }
@@ -49,7 +23,7 @@ slipmat_indices() {
 }
 
 echo "Watching Slipmat's audio stream. Play across a track boundary."
-echo "Expect: nothing at all. A 'remove' of Slipmat's own stream is a gap."
+echo "A remove and new event mark a reopened audio stream."
 echo
 printf 'Timestamps below are local time; the app logs UTC (offset %s).\n' \
 	"$(date '+%:z')"

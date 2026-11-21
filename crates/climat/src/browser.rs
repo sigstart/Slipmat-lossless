@@ -548,6 +548,34 @@ mod tests {
     }
 
     #[test]
+    fn browser_write_shortcuts_send_the_selected_catalogue_id() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use slipmat_core::ipc::{Request, Stage, WriteAction};
+
+        let (link, mut requests) = crate::link::Link::channel();
+        let mut app = crate::App {
+            stage: Stage::Ready,
+            ..Default::default()
+        };
+        app.pane = crate::ui::Pane::Browser;
+        app.browser.rows = vec![song(Some("123"))];
+        for (key, expected) in [
+            ('A', WriteAction::AddToLibrary),
+            ('F', WriteAction::Favorite),
+        ] {
+            assert!(crate::on_key(
+                KeyEvent::new(KeyCode::Char(key), KeyModifiers::SHIFT),
+                &link,
+                &mut app
+            ));
+            assert!(matches!(
+                requests.try_recv().unwrap(),
+                Request::Write { action, id } if action == expected && id == "123"
+            ));
+        }
+    }
+
+    #[test]
     fn unplayable_rows_do_not_shift_the_starting_track() {
         // The trap: Apple returns rows it will not stream, the daemon drops
         // them, and an index counted over the *drawn* list then opens on the

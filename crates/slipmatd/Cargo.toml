@@ -1,6 +1,6 @@
 [package]
 name = "slipmatd"
-description = "The Slipmat daemon: owns the sidecar, serves clients over a socket"
+description = "The Slipmat daemon: native playback and Apple Music services"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

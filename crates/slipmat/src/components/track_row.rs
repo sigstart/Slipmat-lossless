@@ -38,10 +38,6 @@ fn icon(entry: &Entry) -> &'static str {
 #[derive(Debug, Clone)]
 pub struct RowFacts {
     pub catalog_id: String,
-    /// The `i.…` id, present only for a track read out of the library. Removal
-    /// needs it and the catalog id will not do — the two id spaces are not
-    /// interchangeable.
-    pub library_id: Option<String>,
     pub in_library: bool,
     pub favorite: bool,
 }
@@ -50,10 +46,6 @@ pub struct RowFacts {
 #[derive(Debug)]
 pub struct RowMenuRequest {
     pub catalog_id: String,
-    /// The library id, when this track came from the library. `None` means
-    /// removal cannot be offered even if `in_library` is true, because we do
-    /// not know which row to delete.
-    pub library_id: Option<String>,
     /// Already saved, so "Add to Library" is not offered.
     pub in_library: bool,
     /// Already starred, so "Favourite" is not offered.
@@ -103,33 +95,8 @@ pub struct LibraryItem {
 /// The widgets a row publishes while it is on screen.
 #[derive(Debug, Clone)]
 pub struct LibraryRowWidgets {
-    /// The favourite star, so it can be repainted without rebuilding the list.
-    pub star: gtk::Image,
     pub icon: gtk::Image,
     pub root: gtk::Box,
-    /// What the row menu will read if it opens next.
-    ///
-    /// Published because repainting the star is not enough: the menu decides
-    /// what to offer from these facts, captured at bind time. Updating the
-    /// model and the star but not this is why a just-un-starred row still
-    /// offered "Remove Favourite".
-    pub facts: std::rc::Rc<std::cell::RefCell<Option<RowFacts>>>,
-}
-
-impl LibraryRowWidgets {
-    /// Bring a row already on screen up to date, without rebinding it.
-    ///
-    /// Both flags together on purpose. They were separate setters and a repaint
-    /// called only one, so a row could show a cleared star while its menu still
-    /// believed the song was in the library. Off-screen rows need none of this
-    /// — they read the shared cell when they next bind.
-    pub fn refresh(&self, favorite: bool, in_library: bool) {
-        if let Some(facts) = self.facts.borrow_mut().as_mut() {
-            facts.favorite = favorite;
-            facts.in_library = in_library;
-        }
-        self.star.set_visible(favorite);
-    }
 }
 
 impl LibraryItem {
@@ -321,7 +288,6 @@ impl RelmListItem for LibraryItem {
                     .unwrap_or((0, 0));
                 request(RowMenuRequest {
                     catalog_id: shown.catalog_id,
-                    library_id: shown.library_id,
                     in_library: shown.in_library,
                     favorite: shown.favorite,
                     at,
@@ -340,7 +306,6 @@ impl RelmListItem for LibraryItem {
                 gesture.set_state(gtk::EventSequenceState::Claimed);
                 request(RowMenuRequest {
                     catalog_id: shown.catalog_id,
-                    library_id: shown.library_id,
                     in_library: shown.in_library,
                     favorite: shown.favorite,
                     at: (x as i32, y as i32),
@@ -388,7 +353,6 @@ impl RelmListItem for LibraryItem {
                     // library too, and there `id` is the catalog id — handing
                     // that to the removal endpoint is a well-formed request
                     // that deletes nothing.
-                    library_id: track.library_id.clone(),
                     in_library,
                     favorite,
                 })
@@ -428,10 +392,8 @@ impl RelmListItem for LibraryItem {
                     self.registry.borrow_mut().insert(
                         id.clone(),
                         LibraryRowWidgets {
-                            star: widgets.star.clone(),
                             icon: widgets.icon.clone(),
                             root: root.clone(),
-                            facts: widgets.showing.clone(),
                         },
                     );
                 }

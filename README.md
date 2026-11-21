@@ -71,115 +71,39 @@ builds use native FairPlay playback on Linux x86-64.
 
 ## Install
 
-You need an **active Apple Music subscription** and **a network connection
-whenever you play**. The native provider is prepared from this checkout. See
-[Development](#development) for setup. Published releases that predate the
-native backend use Chromium and download Widevine on first run.
+Slipmat needs Linux x86-64, an active Apple Music subscription, and a network
+connection. Prepare the native provider from the checkout before launching
+either client. See [Development](#development) and the
+[FairPlay staging guide](vendor/fairplay/README.md).
 
-### Arch and derivatives
-
-```bash
-yay -S slipmat        # latest release: the GNOME app
-yay -S climat         # latest release: the terminal player
-yay -S slipmat-git    # tracks main: the GNOME app
-yay -S climat-git     # tracks main: the terminal player
-```
-
-Either client pulls in the shared playback daemon. The release and `-git`
-packages conflict, following the AUR convention. `-git` packages build the
-current `main` branch, which may contain unfinished work. The `-git` packages
-support both x86_64 and aarch64. ARM64 users need them until v0.12 is released.
-
-### Flatpak for any distribution
-
-Download `Slipmat.flatpak` from the [latest
-release](https://github.com/SoftARV/Slipmat/releases/latest), then:
-
-```bash
-flatpak install ./Slipmat.flatpak
-flatpak run dev.miguelrincon.Slipmat
-```
-
-Starting with v0.12, choose `Slipmat-x86_64.flatpak` or
-`Slipmat-aarch64.flatpak` to match your CPU.
-
-A bundle contains the app but fetches its runtime during installation. Accept
-the prompt to download GNOME 49 from Flathub. Declining it reports that the
-matching `org.gnome.Platform` runtime was not found.
-If your machine has no Flathub remote at all:
-
-```bash
-flatpak remote-add --if-not-exists --user flathub \
-  https://dl.flathub.org/repo/flathub.flatpakrepo
-```
-
-Slipmat has no Flathub listing. Download its bundle from GitHub Releases.
-
-The bundle includes the GNOME app, engine and sidecar. Install `climat` from the
-AUR or build it from source.
+On Arch, the development AUR packages are `slipmat-git` and `climat-git`.
+Either client pulls in the shared daemon. The native provider still needs the
+local preparation step.
 
 ### From source
 
-```bash
-sudo pacman -S --needed base-devel pkgconf rust gtk4 libadwaita librsvg \
-                        nodejs npm libpulse
-make install     # build + install to ~/.local, no sudo
-```
-
-The build requires Rust ≥ 1.93, the MSRV for relm4 0.11, and Node. I verified it
-with Node 26. Launch **Slipmat** from the app grid or run `slipmat`. If your
-shell cannot find that command, add `~/.local/bin` to your `PATH`.
-
-`climat` installs alongside Slipmat and includes its own desktop entry. It opens
-in a terminal but still needs a graphical session because the daemon runs
-Chromium. A plain SSH connection to a headless machine cannot provide the
-display server Chromium requires.
+Install Rust ≥ 1.93, the GTK and libadwaita development packages, libpulse,
+a C/C++ toolchain, Go, Git, and Bubblewrap. Linux Secret Service and
+`secret-tool` enable session restoration. Run `make install` to install GTK,
+CLImat, and the daemon under `~/.local`.
 
 ### First run
 
-The first client you start opens Apple's sign-in window. The daemon hides it
-after authentication and shares that session with both clients. Install the app
-before testing notifications; GNOME needs its `.desktop` entry to display them.
-
-## Limitations
-
-- **Online playback only.** Apple Music requires a network connection to
-  authorize and stream each track.
-- **Native playback requires Linux x86-64.** This checkout's native provider
-  uses the x86-64 FairPlay libraries.
-- **Library browsing requires a desktop session.** The Chromium library sidecar
-  needs a Wayland or X11 display, including when using CLImat.
-- **Apple can change `music.apple.com`.** Slipmat uses a small hook to drive
-  MusicKit. If Apple changes that interface, Slipmat reports the error instead
-  of leaving you at a spinner.
-- **A few library tracks may be unplayable.** Apple delists tracks while leaving
-  them in your library. Slipmat remembers failed tracks across sessions and
-  dims them so they cannot break a queue.
-
-Known bugs live in [the issue tracker](https://github.com/SoftARV/Slipmat/issues).
+Sign in from the GTK dialog or run `climat sign-in` in a terminal. Both clients
+use the same session for playback, search, and library access. CLImat uses
+**Shift+A** to add a song and **Shift+F** to favourite it.
 
 ## How it works
 
-Both clients send playback and queue commands to `slipmatd`. The daemon
-holds the queue, advances it after each track, and sends state changes to both
-clients and MPRIS. A signed-in FairPlay provider opens the licensed ALAC stream.
-Symphonia decodes the audio and sends PCM to the local PulseAudio-compatible
-server. Chromium is muted and continues to supply web library sign-in and
-MusicKit library operations.
+`slipmatd` owns the queue, catalogue and library requests, and MPRIS. The native
+provider opens the licensed ALAC stream, and Symphonia decodes it for the local
+PulseAudio-compatible server. With Secret Service available, the provider can
+restore an encrypted session profile after a daemon restart.
 
-Native and library sign-ins are separate. Slipmat opens the native sign-in
-dialog when playback needs it. CLImat prompts you to run `climat sign-in`
-from a second terminal. The selected queue item starts after successful native
-sign-in. With Linux Secret Service available through `secret-tool`, Slipmat
-saves the native profile encrypted and tries it again at daemon startup.
-Native sign-out removes the saved profile, and an expired session requires
-a new sign-in. The Apple Account password and verification code are used
-during sign-in only.
-
-Native playback buffers each licensed track before opening the audio output.
 Queue playback, pause, and skips work across both clients. Seeking, shuffle,
-repeat, and gapless transitions are deferred. On restart, the daemon restores
-the queue paused at the start of the selected track.
+repeat, gapless transitions, removing library songs, and unfavouriting are
+currently unavailable. The Flatpak is a build artifact pending a native
+provider setup for that distribution.
 
 ## Development
 
@@ -189,7 +113,6 @@ and Symphonia output, and registers the launcher in the user's Slipmat state
 directory. Run it again after changing the provider or moving the checkout.
 
 ```bash
-make sidecar
 sh scripts/fairplay-trial/prepare.sh
 cargo build --locked --workspace
 target/debug/slipmat                        # the GNOME app
@@ -209,9 +132,9 @@ each change.
 
 ## Related
 
-[Sidra](https://github.com/wimpysworld/sidra) and [Cider](https://cider.sh)
-pioneered the castLabs Electron approach for Apple Music on Linux. Slipmat uses
-their groundwork with a different interface.
+Slipmat builds on [Adam](vendor/fairplay/README.md)'s native
+playback work. [Sidra](https://github.com/wimpysworld/sidra) and
+[Cider](https://cider.sh) helped establish Apple Music clients on Linux.
 
 ## Licence
 

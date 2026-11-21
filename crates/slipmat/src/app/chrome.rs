@@ -220,10 +220,8 @@ pub(super) fn show_about(parent: &adw::ApplicationWindow) {
         .support_url(SUPPORT_URL)
         .comments(
             "A native GNOME client for Apple Music.\n\n\
-             Playback runs through Apple's own MusicKit player using Google's \
-             Widevine CDM, in a hidden helper process. Slipmat is a native \
-             front-end for a licensed session — it requires an active Apple \
-             Music subscription and an internet connection.",
+             Playback uses Apple's FairPlay libraries and requires an active \
+             Apple Music subscription and an internet connection.",
         )
         .build();
     about.present(Some(parent));
@@ -327,8 +325,8 @@ impl AppModel {
         // this is the one moment Slipmat cannot hide the web engine.
         let note = gtk::Label::builder()
             .label(
-                "Apple's own sign-in page opens in a separate window, including \
-                 two-factor if your account uses it. It closes for good once you're in.",
+                "Sign in to your Apple Account from this app. Have your verification \
+                 code ready if your account uses two-factor authentication.",
             )
             .justify(gtk::Justification::Center)
             .wrap(true)
@@ -444,11 +442,8 @@ impl AppModel {
         parent: &adw::ApplicationWindow,
     ) {
         let dialog = adw::AlertDialog::new(
-            Some("Sign out of the Apple Music library?"),
-            Some(
-                "Slipmat will forget this session. Signing back in opens Apple's \
-                 login window again.",
-            ),
+            Some("Sign out of Apple Music?"),
+            Some("Slipmat will forget the saved session. You can sign in again from this app."),
         );
         dialog.add_response("cancel", "Cancel");
         dialog.add_response("sign-out", "Sign Out");

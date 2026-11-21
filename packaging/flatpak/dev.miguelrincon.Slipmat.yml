@@ -11,22 +11,12 @@ runtime: org.gnome.Platform
 runtime-version: '49'
 sdk: org.gnome.Sdk
 
-# Chromium's own SUID sandbox cannot work inside Flatpak's. This base app
-# supplies zypak, which translates Chromium's sandbox calls into the ones
-# Flatpak allows. Measured without it: the sidecar aborts on
-# `chrome-sandbox is owned by root and has mode 4755` and rule 6 restarts it
-# for ever, which looks like a broken app rather than a packaging mistake.
-base: org.electronjs.Electron2.BaseApp
-base-version: '25.08'
-
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
 
 command: slipmat
 
 finish-args:
-  # Always. Widevine has no persistent licences on Linux, so playback needs a
-  # connection every time — and the CDM itself is fetched on first run.
   - --share=network
   - --share=ipc
   - --socket=wayland
@@ -40,17 +30,6 @@ finish-args:
   # `GtkApplication` exits 0 with no window if it cannot register. MPRIS needs
   # its own name on top of that — it is the headline feature.
   - --own-name=org.mpris.MediaPlayer2.Slipmat
-  # **The sandbox's own sidecar, for every process in it.** The launcher
-  # exports this and the daemon used to get it only by being the launcher's
-  # child — true today, and a thin thing to rest on now that the daemon is a
-  # separate process in its own session. Set here it also survives
-  # `flatpak run --command=slipmatd`. Getting it wrong fails in the documented
-  # nasty way: fresh Rust against stale JavaScript, silently.
-  - --env=SLIPMAT_SIDECAR=/app/share/slipmat/sidecar
-  # Slipmat keeps nothing of the user's outside its own directories: settings,
-  # the artwork cache, the session, and the CDM all live under the app's
-  # config and cache. So no home access at all.
-
 modules:
   - name: slipmat
     buildsystem: simple
@@ -61,12 +40,8 @@ modules:
     sources:
       - type: dir
         path: ../..
-        # Without these the build copies ~10GB of `target/` and the 313MB
-        # `node_modules` into the sandbox, neither of which it uses: the crates
-        # come from `cargo-sources.json` and Electron from the pinned archive.
         skip:
           - target
-          - sidecar/node_modules
           - vendor/fairplay/x86_64/rootfs
           - vendor/fairplay/x86_64/compat
           - .git
@@ -77,25 +52,6 @@ modules:
       # Regenerate with packaging/flatpak/generate-sources.sh
       - cargo-sources.json
 
-      # castLabs Electron, pinned. Fetched here rather than by `npm install`
-      # for two reasons: `flatpak-builder` forbids network during a build, and
-      # nothing in the npm tree is needed at *runtime* — the app runs
-      # `node_modules/electron/dist/electron` directly, and the other thirteen
-      # packages exist only to download that binary.
-      - type: archive
-        url: https://github.com/castlabs/electron-releases/releases/download/v44.1.0%2Bwvcus/electron-v44.1.0%2Bwvcus-linux-x64.zip
-        sha256: a719a9cc77924edfa50348b9fdb3d5cef2e5afa44317108ec1c3cb94c58f9085
-        strip-components: 0
-        dest: electron-dist
-        only-arches:
-          - x86_64
-      - type: archive
-        url: https://github.com/castlabs/electron-releases/releases/download/v44.1.0%2Bwvcus/electron-v44.1.0%2Bwvcus-linux-arm64.zip
-        sha256: 72e3010d05edf07a11a40149b68ff1b0c1a5db680a435a40903893bf02f5adf3
-        strip-components: 0
-        dest: electron-dist
-        only-arches:
-          - aarch64
     build-commands:
       - cargo --offline fetch --manifest-path Cargo.toml --verbose
       # **Only what this package ships.** The workspace also holds `climat`,
@@ -104,7 +60,7 @@ modules:
       # *vendored*, because `fetch` resolves the whole workspace, but there is
       # no reason to compile a binary nothing will install.
       - cargo --offline build --release --verbose -p slipmat -p slipmatd
-      - install -Dm755 target/release/slipmat /app/bin/slipmat.real
+      - install -Dm755 target/release/slipmat /app/bin/slipmat
       # **Required, not optional.** The app is a client of the daemon: it looks
       # for `slipmatd` beside its own binary and starts one if nothing is
       # listening. Without it here the window comes up and stays on
@@ -113,28 +69,6 @@ modules:
       # No systemd unit goes with it. The daemon starts itself on the first
       # connection, which is the whole point — nothing for anyone to enable.
       - install -Dm755 target/release/slipmatd /app/bin/slipmatd
-
-      # The sidecar, laid out exactly where `electron_binary()` looks:
-      # <sidecar>/node_modules/electron/dist/electron
-      - install -Dm644 sidecar/package.json /app/share/slipmat/sidecar/package.json
-      - install -Dm644 sidecar/main.js /app/share/slipmat/sidecar/main.js
-      - install -Dm644 sidecar/preload.js /app/share/slipmat/sidecar/preload.js
-      - install -Dm644 sidecar/queue-identity.js /app/share/slipmat/sidecar/queue-identity.js
-      - mkdir -p /app/share/slipmat/sidecar/node_modules/electron/dist
-      - cp -a electron-dist/. /app/share/slipmat/sidecar/node_modules/electron/dist/
-      # zypak has to be the *direct* parent of Chromium, and Chromium is the
-      # app's grandchild — Rust spawns Electron. So the wrapper goes here,
-      # standing where `electron_binary()` looks, rather than around the app.
-      - mv /app/share/slipmat/sidecar/node_modules/electron/dist/electron
-          /app/share/slipmat/sidecar/node_modules/electron/dist/electron.bin
-      - chmod +x /app/share/slipmat/sidecar/node_modules/electron/dist/electron.bin
-      - install -Dm755 packaging/flatpak/electron-shim
-          /app/share/slipmat/sidecar/node_modules/electron/dist/electron
-
-      # zypak-wrapper is what makes Chromium's sandbox work in here. The
-      # launcher also points the app at the bundled sidecar, because
-      # `locate()` prefers $XDG_DATA_HOME and there is no install tree here.
-      - install -Dm755 slipmat-launcher /app/bin/slipmat
 
       - install -Dm644 data/dev.miguelrincon.Slipmat.desktop /app/share/applications/dev.miguelrincon.Slipmat.desktop
       - install -Dm644 data/icons/hicolor/scalable/apps/dev.miguelrincon.Slipmat.svg

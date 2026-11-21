@@ -39,26 +39,10 @@ impl AppModel {
         // Library" for a track read *out of* the library, or "Favourite" for
         // one already starred, is a menu that lies about the state of things.
         let account = gtk::gio::Menu::new();
-        if req.in_library {
-            // Only when we hold the library id — the catalog id will not do,
-            // and offering a removal we cannot perform is worse than not
-            // offering one.
-            if req.library_id.is_some() {
-                account.append(
-                    Some("_Remove from Library"),
-                    Some("row.remove-from-library"),
-                );
-            }
-        } else {
+        if !req.in_library {
             account.append(Some("Add to _Library"), Some("row.add-to-library"));
         }
-        // Both directions now. The removals go out through the sidecar rather
-        // than `music/client.rs`: over REST this exact favourites path answers
-        // "400 Insufficient Permissions", and library removal has no documented
-        // endpoint at all. MusicKit's own client does both (#34).
-        if req.favorite {
-            account.append(Some("Remove _Favourite"), Some("row.unfavorite"));
-        } else {
+        if !req.favorite {
             account.append(Some("_Favourite"), Some("row.favorite"));
         }
         if account.n_items() > 0 {
@@ -82,36 +66,6 @@ impl AppModel {
                 sender.input(AppMsg::Enqueue {
                     catalog_id: id.clone(),
                     next,
-                });
-            });
-            actions.add_action(&action);
-        }
-
-        // The two removals. Separate from the adds below because they take a
-        // different route entirely — the sidecar, not HTTP — and because
-        // removal needs the *library* id while un-favouriting needs the
-        // *catalog* one.
-        {
-            let action = gtk::gio::SimpleAction::new("remove-from-library", None);
-            let library_id = req.library_id.clone();
-            let catalog_id = req.catalog_id.clone();
-            let sender = self.menu_sender.clone();
-            action.connect_activate(move |_, _| {
-                if let Some(library_id) = library_id.clone() {
-                    sender.input(AppMsg::RemoveFromLibrary {
-                        library_id,
-                        catalog_id: catalog_id.clone(),
-                    });
-                }
-            });
-            actions.add_action(&action);
-
-            let action = gtk::gio::SimpleAction::new("unfavorite", None);
-            let catalog_id = req.catalog_id.clone();
-            let sender = self.menu_sender.clone();
-            action.connect_activate(move |_, _| {
-                sender.input(AppMsg::Unfavorite {
-                    catalog_id: catalog_id.clone(),
                 });
             });
             actions.add_action(&action);

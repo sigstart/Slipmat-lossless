@@ -66,7 +66,7 @@ impl PlayerState {
         }
     }
 
-    /// Fold one sidecar event into the mirror.
+    /// Fold one playback event into the mirror.
     ///
     /// Returns `true` when something the *MPRIS metadata* depends on changed,
     /// so `app/mod.rs` knows whether to re-export properties. Position ticks alone
@@ -105,16 +105,10 @@ impl PlayerState {
                 self.last_tick = Some(Instant::now());
                 false
             }
-            Event::Modes { shuffle, repeat } => {
-                self.shuffle = *shuffle;
-                self.repeat = *repeat;
-                true
-            }
             Event::Queue(queue) => {
                 self.apply_queue(queue);
                 true
             }
-            _ => false,
         }
     }
 

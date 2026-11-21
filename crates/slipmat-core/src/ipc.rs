@@ -66,18 +66,9 @@ pub fn connect_or_spawn(exe: &std::path::Path) -> std::io::Result<std::os::unix:
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
 
-    // **Its own session, or the terminal takes it with it.** A plain child
-    // inherits the client's process group *and* its session, and so does the
-    // sidecar one level down — so closing the terminal SIGHUPs all three.
-    // Chromium traps on SIGHUP and dumps core, the daemon dies before its
-    // SIGTERM handler can save the session or clear the socket, and the music
-    // stops. Measured: closing the window left a 7.8 MB Electron core dump and
-    // an orphaned socket every time.
-    //
-    // `setsid` is the whole fix. It is the one thing that has to happen between
-    // `fork` and `exec`, which is what `pre_exec` is for — and why it is
-    // `unsafe`: only async-signal-safe calls are legal in that window, and
-    // `setsid` is one.
+    // Give the daemon an independent session so closing a terminal client
+    // cannot interrupt playback.
+    // SAFETY: setsid is async-signal-safe.
     unsafe {
         use std::os::unix::process::CommandExt;
         command.pre_exec(|| {
@@ -101,9 +92,7 @@ pub fn connect_or_spawn(exe: &std::path::Path) -> std::io::Result<std::os::unix:
             let _ = child.wait();
         })?;
 
-    // It binds the socket before it does anything else, so this is the daemon
-    // coming up rather than the sidecar — a fraction of a second, not the
-    // seconds Chromium takes.
+    // The socket can accept clients before the native account is ready.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -152,16 +141,11 @@ pub enum Request {
     #[serde(rename = "subscribe")]
     Subscribe,
 
-    /// Show Apple's own sign-in.
-    ///
-    /// **The one thing that needs a window**, and the daemon has none of its
-    /// own — it hands this to the sidecar, whose hidden Chromium is shown for
-    /// exactly this and hidden again afterwards.
+    /// Prompt the requesting client for native Apple Music sign-in.
     #[serde(rename = "signIn")]
     SignIn,
 
-    /// End the Apple session. Clears the cookies too, which only MusicKit's own
-    /// context can do.
+    /// End the native session and forget the saved profile.
     #[serde(rename = "signOut")]
     SignOut,
 
@@ -556,8 +540,7 @@ pub struct Snapshot {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "stage", rename_all = "camelCase")]
 pub enum Stage {
-    /// The sidecar is up but MusicKit has not attached yet. Also what a client
-    /// assumes before it has asked.
+    /// The daemon is connecting or restoring a saved session.
     #[default]
     Connecting,
     /// Ready to play.
