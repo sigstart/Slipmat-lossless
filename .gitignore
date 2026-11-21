@@ -1,5 +1,4 @@
 /target
-/sidecar/node_modules
 /vendor/fairplay/x86_64/rootfs/
 /vendor/fairplay/x86_64/compat/
 

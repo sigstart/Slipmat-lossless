@@ -104,12 +104,6 @@ jobs:
           - arch: aarch64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
-    # Creating a release needs this, and the default token does not have it:
-    # the first tag build produced a perfectly good bundle and then failed with
-    # `403 Resource not accessible by integration`. Scoped to this job because
-    # it is the only one that publishes anything.
-    permissions:
-      contents: write
     # Both architectures guard non-documentation pull requests. Tags and
     # manual runs always build; documentation-only changes skip the downloads.
     if: >-
@@ -138,8 +132,7 @@ jobs:
           flatpak install -y --user --noninteractive flathub \
             org.gnome.Platform//49 \
             org.gnome.Sdk//49 \
-            org.freedesktop.Sdk.Extension.rust-stable//25.08 \
-            org.electronjs.Electron2.BaseApp//25.08
+            org.freedesktop.Sdk.Extension.rust-stable//25.08
 
       # The same target a developer runs, so CI cannot quietly diverge from it.
       - name: make flatpak-bundle
@@ -152,15 +145,6 @@ jobs:
           path: Slipmat-${{ matrix.arch }}.flatpak
           retention-days: 14
 
-      # Attached to the release on a tag, so `v0.2.0` carries something
-      # installable rather than only source that most distributions cannot
-      # build.
-      - name: Attach to the release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: Slipmat-${{ matrix.arch }}.flatpak
-          fail_on_unmatched_files: true
 
   # One stable check for branch protection, including documentation-only PRs
   # where GitHub skips the matrix before expanding its architecture names.
