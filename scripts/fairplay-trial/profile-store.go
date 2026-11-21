@@ -19,6 +19,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 )
 
@@ -42,6 +44,11 @@ func run(launcher, profile, archive, mode string) error {
 		return err
 	}
 	defer os.RemoveAll(profile)
+	profileDir, err := os.OpenFile(profile, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer profileDir.Close()
 
 	switch mode {
 	case "restore":
@@ -73,7 +80,7 @@ func run(launcher, profile, archive, mode string) error {
 		var reply struct{ Type string }
 		if mode == "seed" && json.Unmarshal(frame, &reply) == nil && reply.Type == "signedIn" {
 			// Sign-in can still be used when the desktop keyring is unavailable.
-			if err := save(profile, archive); err != nil {
+			if err := save(profileDir, archive); err != nil {
 				fmt.Fprintln(os.Stderr, "Slipmat could not save its native session")
 			}
 		}
@@ -130,12 +137,30 @@ func profileCipher(archive string, create bool) (cipher.AEAD, error) {
 	return cipher.NewGCM(block)
 }
 
-func readLimited(path string, limit int64) ([]byte, error) {
-	file, err := os.Open(path)
+// Open each component separately so O_NOFOLLOW covers the whole relative path.
+func openProfileFile(dir *os.File, path string) (*os.File, error) {
+	name, rest, nested := strings.Cut(path, "/")
+	if name == "" || name == "." || name == ".." {
+		return nil, os.ErrInvalid
+	}
+	// A FIFO must not block open before readLimited can reject it.
+	flags := syscall.O_RDONLY | syscall.O_CLOEXEC | syscall.O_NOFOLLOW | syscall.O_NONBLOCK | syscall.O_NOCTTY
+	if nested {
+		flags |= syscall.O_DIRECTORY
+	}
+	fd, err := syscall.Openat(int(dir.Fd()), name, flags, 0)
 	if err != nil {
 		return nil, err
 	}
+	file := os.NewFile(uintptr(fd), name)
+	if !nested {
+		return file, nil
+	}
 	defer file.Close()
+	return openProfileFile(file, rest)
+}
+
+func readLimited(file *os.File, limit int64) ([]byte, error) {
 	stat, err := file.Stat()
 	if err != nil || !stat.Mode().IsRegular() || stat.Size() > limit {
 		return nil, errors.New("invalid profile file")
@@ -148,7 +173,7 @@ func readLimited(path string, limit int64) ([]byte, error) {
 	return data, err
 }
 
-func snapshot(profile string) ([]byte, error) {
+func snapshot(profile *os.File) ([]byte, error) {
 	files := make(map[string][]byte)
 	defer func() {
 		for _, data := range files {
@@ -157,10 +182,15 @@ func snapshot(profile string) ([]byte, error) {
 	}()
 	var size int64
 	for _, name := range profileFiles {
-		data, err := readLimited(filepath.Join(profile, "files", name), maxProfile-size)
+		file, err := openProfileFile(profile, "files/"+name)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
+		if err != nil {
+			return nil, err
+		}
+		data, err := readLimited(file, maxProfile-size)
+		file.Close()
 		if err != nil {
 			return nil, err
 		}
@@ -175,7 +205,7 @@ func snapshot(profile string) ([]byte, error) {
 
 const archiveVersion = "slipmat-native-profile-v1"
 
-func save(profile, archive string) error {
+func save(profile *os.File, archive string) error {
 	data, err := snapshot(profile)
 	if err != nil {
 		return err
@@ -213,7 +243,12 @@ func save(profile, archive string) error {
 }
 
 func load(profile, archive string) error {
-	blob, err := readLimited(archive, 2*maxProfile)
+	file, err := os.Open(archive)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	blob, err := readLimited(file, 2*maxProfile)
 	if err != nil {
 		return err
 	}
