@@ -1,5 +1,7 @@
 /target
 /sidecar/node_modules
+/vendor/fairplay/x86_64/rootfs/
+/vendor/fairplay/x86_64/compat/
 
 # makepkg build output. The PKGBUILDs are source; everything makepkg creates
 # beside them is not — including the ~330 MB it downloads.
@@ -25,3 +27,4 @@ packaging/flatpak/.flatpak-cargo-generator.py
 *.flatpak
 
 CLAUDE.local.md
+.codex
