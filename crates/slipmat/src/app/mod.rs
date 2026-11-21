@@ -44,7 +44,9 @@ use relm4::typed_view::list::TypedListView;
 use crate::components::artwork::{self, ART_SIZE};
 use crate::components::detail_page::{DetailPage, PageKind};
 use crate::components::grid_item::{ArtRegistry, ArtRequest, GridItem, Tile, art_registry};
-use crate::components::now_playing::{NowPlaying, NowPlayingInput, NowPlayingOutput, VOLUME_STEP};
+use crate::components::now_playing::{
+    NowPlaying, NowPlayingInput, NowPlayingOutput, PlaybackCapabilities, VOLUME_STEP,
+};
 use crate::components::player_view::{PlayerView, PlayerViewInput};
 use crate::components::queue_view::{QueueView, QueueViewInput, QueueViewOutput};
 use crate::components::track_row::LibraryRowWidgets;
@@ -70,6 +72,7 @@ use slipmat_core::player::protocol::RepeatMode;
 mod background;
 mod chrome;
 mod library;
+mod native_auth;
 mod osd;
 mod pages;
 mod pins;
@@ -123,9 +126,14 @@ pub enum Stage {
 pub struct AppModel {
     stage: Stage,
     mirror: Mirror,
+    native_playback: bool,
+    playback_capabilities: PlaybackCapabilities,
     /// The first-run gate, while it is up. `Some` exactly when the app is
     /// blocked, which is what stops it being presented twice.
     onboarding: Option<adw::Dialog>,
+    native_auth_action: gtk::gio::SimpleAction,
+    native_auth_dialog: Option<Controller<native_auth::AuthDialog>>,
+    native_auth_needed_for_play: bool,
 
     /// The last track MusicKit reported, kept so the bar can hold it through a
     /// queue reload — see `push_snapshot::showing`.
@@ -414,6 +422,10 @@ impl LibraryAction {
 pub enum AppMsg {
     Quit,
     SignIn,
+    OpenNativeAuth,
+    NativeAuthClosed {
+        signed_in: bool,
+    },
     /// Asks first — see `confirm_sign_out`.
     SignOut,
     SignOutConfirmed,
@@ -603,6 +615,7 @@ pub enum CommandMsg {
     QuitWritten,
     /// Everything the daemon pushed down, including losing it.
     Daemon(daemon::Incoming),
+    NativeAuthAvailable(bool),
     /// Cover art is on disk. `None` when the fetch failed — a missing cover is
     /// cosmetic and must not become a toast.
     Artwork {
@@ -613,7 +626,10 @@ pub enum CommandMsg {
         backdrop: Option<PathBuf>,
     },
     /// A page's header art is on disk, or could not be fetched.
-    PageArtwork { page: u64, path: Option<PathBuf> },
+    PageArtwork {
+        page: u64,
+        path: Option<PathBuf>,
+    },
     /// The artwork sweep finished. It logs its own numbers; this exists so the
     /// work can be a command rather than something done on the GTK thread.
     Pruned(crate::components::prune::Report),
@@ -705,7 +721,7 @@ impl Component for AppModel {
                         set_open: model.show_queue,
                         // The bar is only meaningful once there is a player.
                         // Not a `#[watch]`. See `sync_animated`.
-                        set_reveal_bottom_bar: matches!(model.stage, Stage::Ready),
+                        set_reveal_bottom_bar: model.show_now_playing(),
 
                         // Dragged shut, or clicked away from — the model has to
                         // learn about it or the next toggle fights the widget.
@@ -1425,7 +1441,12 @@ impl Component for AppModel {
             last_queue: None,
             pending_start: None,
             mirror: Mirror::default(),
+            native_playback: false,
+            playback_capabilities: PlaybackCapabilities::default(),
             onboarding: None,
+            native_auth_action: native_auth::register_action(&root, &sender),
+            native_auth_dialog: None,
+            native_auth_needed_for_play: false,
             last_item: None,
             menu_sender: sender.clone(),
             daemon: None,
@@ -1469,7 +1490,8 @@ impl Component for AppModel {
             // Its own section: signing out is an account action, not app
             // furniture, and it should not sit next to About.
             let account = gtk::gio::Menu::new();
-            account.append(Some("_Sign Out"), Some("win.sign-out"));
+            account.append(Some("Sign Out of _Library"), Some("win.sign-out"));
+            native_auth::append_menu_item(&account);
             primary_menu.append_section(None, &account);
 
             // Quit was missing from this menu entirely, while the shortcuts
@@ -1518,6 +1540,7 @@ impl Component for AppModel {
         model.refresh_pin_names();
 
         connect(&sender);
+        native_auth::watch_availability(&sender);
 
         ComponentParts { model, widgets }
     }
@@ -1639,11 +1662,16 @@ struct Animated {
 }
 
 impl AppModel {
+    fn show_now_playing(&self) -> bool {
+        matches!(self.stage, Stage::Ready)
+            || (self.native_playback && !self.mirror.queue.is_empty())
+    }
+
     fn animated_state(&self) -> Animated {
         Animated {
             sidebar: self.show_sidebar,
             queue: self.show_queue,
-            bottom_bar: matches!(self.stage, Stage::Ready),
+            bottom_bar: self.show_now_playing(),
             osd: self.osd_shown,
         }
     }
@@ -1709,6 +1737,13 @@ impl AppModel {
                 }
             }
             AppMsg::SignIn => self.ask(Request::SignIn),
+            AppMsg::OpenNativeAuth => self.open_native_auth(&sender, root),
+            AppMsg::NativeAuthClosed { signed_in } => {
+                self.native_auth_dialog = None;
+                if std::mem::take(&mut self.native_auth_needed_for_play) && !signed_in {
+                    self.transport(Transport::Pause);
+                }
+            }
             AppMsg::SignOut => {
                 // The menu item is always there; asking to sign out when you
                 // already are should do nothing rather than prompt.
@@ -2113,6 +2148,9 @@ impl AppModel {
                 }
             }
             AppMsg::PlayPage { page, shuffle } => {
+                if shuffle && !self.playback_capabilities.shuffle {
+                    return;
+                }
                 let Some(target) = self.pages.iter().find(|p| p.id == page) else {
                     return;
                 };
@@ -2158,7 +2196,7 @@ impl AppModel {
                     // queue that is loaded but idle — a restored session, or a
                     // paused one — it moved silently and looked like nothing
                     // had happened.
-                    if !self.mirror.is_playing() {
+                    if !self.native_playback && !self.mirror.is_playing() {
                         self.transport(Transport::Play);
                     }
                 }
@@ -2302,11 +2340,14 @@ impl AppModel {
         &mut self,
         msg: CommandMsg,
         sender: &ComponentSender<Self>,
-        _root: &adw::ApplicationWindow,
+        root: &adw::ApplicationWindow,
     ) {
         let sender = sender.clone();
         match msg {
             CommandMsg::QuitWritten => notify::quit_cleanly(),
+            CommandMsg::NativeAuthAvailable(available) => {
+                self.native_auth_action.set_enabled(available);
+            }
             CommandMsg::Pruned(report) => {
                 // Reported here rather than inside the sweep, so the sweep
                 // stays a function that returns facts and can be tested as one.
@@ -2406,7 +2447,7 @@ impl AppModel {
                 // screen pick it up as soon as it lands.
                 self.push_snapshot();
             }
-            CommandMsg::Daemon(message) => self.on_daemon(message, &sender),
+            CommandMsg::Daemon(message) => self.on_daemon(message, &sender, root),
         }
     }
 }
@@ -2455,7 +2496,9 @@ impl AppModel {
     /// next. The unplayable-id cache stays — it is about Apple's catalog, not
     /// about the user.
     fn forget_session(&mut self, sender: &ComponentSender<Self>) {
-        self.mirror.clear_account_state();
+        if !self.native_playback {
+            self.mirror.clear_account_state();
+        }
         self.all_tracks.clear();
         self.albums.clear();
         self.artists.clear();
@@ -2492,8 +2535,10 @@ impl AppModel {
         self.rebuild_artists();
         self.rebuild_playlists();
 
-        // Pages and the queue belonged to that session too.
         self.pop_to_results();
+        if self.native_playback {
+            return;
+        }
         self.show_queue = false;
         self.last_item = None;
         self.last_queue = None;
@@ -2517,7 +2562,9 @@ impl AppModel {
     /// been easy to forget.
     fn sync_onboarding(&mut self, sender: &ComponentSender<Self>, root: &adw::ApplicationWindow) {
         match (matches!(self.stage, Stage::SignedOut), &self.onboarding) {
-            (true, None) => self.onboarding = Some(self.present_onboarding(sender, root)),
+            (true, None) if self.native_auth_dialog.is_none() => {
+                self.onboarding = Some(self.present_onboarding(sender, root));
+            }
             (false, Some(dialog)) => {
                 // `can_close` is false, so it will not go on its own.
                 dialog.force_close();

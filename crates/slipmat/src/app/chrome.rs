@@ -343,6 +343,10 @@ impl AppModel {
             .build();
         column.append(&button);
         column.append(&note);
+        column.append(&super::native_auth::onboarding_button(
+            &self.native_auth_action,
+            sender,
+        ));
         page.set_child(Some(&column));
 
         // A way out of the app, on the one screen that otherwise has none:
@@ -440,7 +444,7 @@ impl AppModel {
         parent: &adw::ApplicationWindow,
     ) {
         let dialog = adw::AlertDialog::new(
-            Some("Sign out of Apple Music?"),
+            Some("Sign out of the Apple Music library?"),
             Some(
                 "Slipmat will forget this session. Signing back in opens Apple's \
                  login window again.",

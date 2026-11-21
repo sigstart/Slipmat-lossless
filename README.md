@@ -11,9 +11,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 Apple Music for Linux with a native interface.
 
-Apple does not ship a Linux client, and Widevine prevents a native audio stack.
-Slipmat builds its interface in Rust and uses a hidden web engine to decode
-audio. The GNOME app and terminal player share that engine.
+Slipmat and its terminal client, CLImat, share one daemon and queue. Source
+builds use native FairPlay playback on Linux x86-64.
 
 <p align="center">
   <img src="docs/screenshots/library.webp" alt="Slipmat showing a library of songs with the sidebar collapsed: the playing track marked in red, two Apple cannot stream greyed out, a menu button on every row, and the Now Playing bar along the bottom with the playing track's cover behind it">
@@ -73,13 +72,9 @@ audio. The GNOME app and terminal player share that engine.
 ## Install
 
 You need an **active Apple Music subscription** and **a network connection
-whenever you play**. Linux Widevine cannot cache playback licences. The v0.11
-release targets x86_64. Development builds for v0.12 support both x86_64 and
-aarch64. See [Limitations](#limitations).
-
-Each installation method downloads castLabs Electron once. Its Chromium bundle
-uses about **200 MB**, and its component updater fetches the Widevine CDM on
-first run.
+whenever you play**. The native provider is prepared from this checkout. See
+[Development](#development) for setup. Published releases that predate the
+native backend use Chromium and download Widevine on first run.
 
 ### Arch and derivatives
 
@@ -148,19 +143,12 @@ before testing notifications; GNOME needs its `.desktop` entry to display them.
 
 ## Limitations
 
-The platform imposes these limitations:
-
-- **No offline or downloaded playback.** Linux's Widevine CDM does not support
-  persistent licences and reports `PLATFORM_UNVERIFIED`. Widevine must license
-  each track over the network, so Slipmat cannot play offline.
-- **~200 MB on disk for the sidecar.** The sidecar bundles Chromium to provide
-  Widevine.
-- **ARM64 ships with v0.12.** The v0.11 release remains x86_64-only. We verified
-  the v0.12 development packages through first-run Widevine setup, Apple
-  sign-in, library loading and playback as both an Arch Linux ARM package and a
-  GNOME 49 Flatpak.
-- **`climat` needs a desktop session.** Its daemon runs Chromium, which requires
-  a display server even when it keeps the window hidden.
+- **Online playback only.** Apple Music requires a network connection to
+  authorize and stream each track.
+- **Native playback requires Linux x86-64.** This checkout's native provider
+  uses the x86-64 FairPlay libraries.
+- **Library browsing requires a desktop session.** The Chromium library sidecar
+  needs a Wayland or X11 display, including when using CLImat.
 - **Apple can change `music.apple.com`.** Slipmat uses a small hook to drive
   MusicKit. If Apple changes that interface, Slipmat reports the error instead
   of leaving you at a spinner.
@@ -172,57 +160,41 @@ Known bugs live in [the issue tracker](https://github.com/SoftARV/Slipmat/issues
 
 ## How it works
 
-Apple Music full tracks are HLS + **Widevine** DRM. On Linux the only Widevine
-CDM comes with Chromium. WebKitGTK has no CDM, and GStreamer cannot decrypt the
-stream. Slipmat therefore needs Chromium for audio decoding.
+Both clients send playback and queue commands to `slipmatd`. The daemon
+holds the queue, advances it after each track, and sends state changes to both
+clients and MPRIS. A signed-in FairPlay provider opens the licensed ALAC stream.
+Symphonia decodes the audio and sends PCM to the local PulseAudio-compatible
+server. Chromium is muted and continues to supply web library sign-in and
+MusicKit library operations.
 
-Slipmat uses three processes:
+Native and library sign-ins are separate. Slipmat opens the native sign-in
+dialog when playback needs it. CLImat prompts you to run `climat sign-in`
+from a second terminal. The selected queue item starts after successful native
+sign-in. The native session ends when the daemon exits.
 
-```
-┌────────────────────────────┐   ┌────────────────────────────┐
-│  Slipmat: GTK4/libadwaita  │   │  climat: the terminal      │  ← what you see
-│  library · search · queue  │   │  same, drawn in text       │
-└─────────────┬──────────────┘   └─────────────┬──────────────┘
-              │      newline-delimited JSON over a Unix socket
-              └──────────────┬─────────────────┘
-┌────────────────────────────▼─────────────────────────────────┐
-│  slipmatd: the engine                         ← no window     │
-│  owns the queue · MPRIS · artwork · the library cache         │
-│  HTTPS ──────────────────────────────► api.music.apple.com    │
-└────────────────────────────┬─────────────────────────────────┘
-                             │  the same JSON, over stdio
-┌────────────────────────────▼─────────────────────────────────┐
-│  sidecar: castLabs Electron                ← invisible        │
-│  hidden music.apple.com  +  MusicKit  +  Widevine             │
-│  → audio straight to PipeWire, untouched                      │
-└───────────────────────────────────────────────────────────────┘
-```
-
-- **The daemon owns the sidecar.** Chromium permits one process to hold its
-  profile lock, so both clients connect to the same engine and player state.
-- **Clients manage the daemon.** The first client starts it. The daemon stops
-  Chromium after five idle minutes and starts it when a client returns.
-- **Rust handles the interface and metadata.** Slipmat uses Apple's REST API for
-  browsing and search. The hidden Chromium window handles sign-in and audio.
-
-Slipmat plays through Apple's own MusicKit player with Google's official CDM. It
-provides native clients for that licensed session. Slipmat does not strip DRM,
-use extracted CDMs or download tracks.
+Native playback buffers each licensed track before opening the audio output.
+Queue playback, pause, and skips work across both clients. Seeking, shuffle,
+repeat, and gapless transitions are deferred. On restart, the daemon restores
+the queue paused at the start of the selected track.
 
 ## Development
 
+Prepare the provider from a desktop session with a local PulseAudio-compatible
+socket. The script verifies the staged FairPlay libraries, builds the provider
+and Symphonia output, and registers the launcher in the user's Slipmat state
+directory. Run it again after changing the provider or moving the checkout.
+
 ```bash
-cargo run                                    # the GNOME app
-cargo run -p climat                          # the terminal player
-RUST_LOG=slipmatd=debug cargo run -p slipmatd   # the engine, with its protocol
-make sidecar-run                             # sidecar alone, window VISIBLE
-make gapless                                 # watch the audio stream across a boundary
-cargo clippy --all-targets -- -D warnings    # the bar
-make check                                   # fmt + clippy + test
+make sidecar
+sh scripts/fairplay-trial/prepare.sh
+cargo build --locked --workspace
+target/debug/slipmat                        # the GNOME app
+target/debug/climat                         # the terminal player
 ```
 
-Start debugging with `make sidecar-run`. A failure there points to DRM or Apple.
-If the sidecar plays the track, inspect the daemon logs next.
+Use `cargo clippy --all-targets -- -D warnings` and `make check` to verify
+changes. `RUST_LOG=slipmatd=debug target/debug/slipmatd` shows daemon events
+when troubleshooting a fresh run.
 
 Both clients reuse a running daemon. Run `pgrep -x slipmatd` before testing a
 new daemon build so an older process does not mask your changes.

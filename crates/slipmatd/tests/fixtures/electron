@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Miguel Rincon
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+import os
+import socket
+import sys
+import threading
+
+
+def emit_events(control):
+    with control.makefile("rb") as events:
+        for event in events:
+            if event == b"crash\n":
+                os._exit(23)
+            sys.stdout.buffer.write(event)
+            sys.stdout.buffer.flush()
+
+
+# The test controls event timing. The daemon still speaks NDJSON to stdin and stdout.
+with socket.socket(socket.AF_UNIX) as control:
+    control.connect(os.environ["SLIPMAT_TEST_CONTROL"])
+    threading.Thread(target=emit_events, args=(control,), daemon=True).start()
+    for command in sys.stdin.buffer:
+        control.sendall(command)

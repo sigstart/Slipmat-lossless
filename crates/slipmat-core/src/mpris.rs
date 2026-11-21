@@ -96,6 +96,7 @@ type Sink = Rc<dyn Fn(MprisCommand)>;
 pub struct Capabilities {
     pub can_raise: bool,
     pub can_quit: bool,
+    pub can_seek: bool,
 }
 
 impl Capabilities {
@@ -104,6 +105,7 @@ impl Capabilities {
         Self {
             can_raise: true,
             can_quit: true,
+            can_seek: true,
         }
     }
 
@@ -112,6 +114,7 @@ impl Capabilities {
         Self {
             can_raise: false,
             can_quit: false,
+            can_seek: true,
         }
     }
 }
@@ -431,6 +434,9 @@ impl LocalPlayerInterface for SlipmatPlayer {
     }
 
     async fn seek(&self, offset: Time) -> fdo::Result<()> {
+        if !self.can.can_seek {
+            return Ok(());
+        }
         let position = self.state.borrow().position_ms as i128;
         let target = (position + i128::from(offset.as_millis())).clamp(0, i128::from(u64::MAX));
         self.send(MprisCommand::Seek(target as u64));
@@ -438,6 +444,9 @@ impl LocalPlayerInterface for SlipmatPlayer {
     }
 
     async fn set_position(&self, supplied_id: TrackId, position: Time) -> fdo::Result<()> {
+        if !self.can.can_seek {
+            return Ok(());
+        }
         let current_id = self.track_list.borrow().current();
         if current_id.as_ref() == Some(&supplied_id) && position.as_millis() >= 0 {
             self.send(MprisCommand::Seek(position.as_millis() as u64));
@@ -526,7 +535,7 @@ impl LocalPlayerInterface for SlipmatPlayer {
     }
 
     async fn can_seek(&self) -> fdo::Result<bool> {
-        Ok(true)
+        Ok(self.can.can_seek)
     }
 
     async fn can_control(&self) -> fdo::Result<bool> {

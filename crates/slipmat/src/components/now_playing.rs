@@ -53,6 +53,23 @@ pub fn mode_opacity(on: bool) -> f64 {
 /// accelerators, so the two cannot drift into disagreeing about what a step is.
 pub const VOLUME_STEP: f64 = 0.05;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaybackCapabilities {
+    pub seek: bool,
+    pub shuffle: bool,
+    pub repeat: bool,
+}
+
+impl Default for PlaybackCapabilities {
+    fn default() -> Self {
+        Self {
+            seek: true,
+            shuffle: true,
+            repeat: true,
+        }
+    }
+}
+
 /// Everything the bar needs, flattened out of `PlayerState` at the boundary.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Snapshot {
@@ -66,6 +83,7 @@ pub struct Snapshot {
     pub has_next: bool,
     pub has_previous: bool,
     pub active: bool,
+    pub capabilities: PlaybackCapabilities,
     pub shuffle: bool,
     /// Whether the queue sidebar is open, so the bar's toggle agrees with it.
     pub queue_open: bool,
@@ -85,7 +103,7 @@ pub struct Snapshot {
 }
 
 impl Default for Snapshot {
-    /// Hand-written for one field: **volume defaults to full, not to zero.**
+    /// **Volume defaults to full, not to zero.**
     ///
     /// The bar is built with a default snapshot before the first real one, so a
     /// zero draws a muted button on a player that is not muted. It used to also
@@ -103,6 +121,7 @@ impl Default for Snapshot {
             has_next: false,
             has_previous: false,
             active: false,
+            capabilities: PlaybackCapabilities::default(),
             shuffle: false,
             queue_open: false,
             repeat: RepeatMode::default(),
@@ -446,7 +465,7 @@ impl SimpleComponent for NowPlaying {
                     #[watch]
                     set_opacity: mode_opacity(model.snap.shuffle),
                     #[watch]
-                    set_sensitive: model.snap.active,
+                    set_sensitive: model.snap.active && model.snap.capabilities.shuffle,
                     connect_clicked => NowPlayingInput::ShuffleClicked,
                 },
 
@@ -498,7 +517,7 @@ impl SimpleComponent for NowPlaying {
                     #[watch]
                     set_opacity: mode_opacity(model.snap.repeat != RepeatMode::None),
                     #[watch]
-                    set_sensitive: model.snap.active,
+                    set_sensitive: model.snap.active && model.snap.capabilities.repeat,
                     #[watch]
                     set_visible: !model.snap.narrow,
                     connect_clicked => NowPlayingInput::RepeatCycled,

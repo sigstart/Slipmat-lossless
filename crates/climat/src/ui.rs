@@ -67,6 +67,7 @@ const SPECTRUM_MAX: usize = 6;
 pub struct View<'a> {
     pub snap: &'a Snapshot,
     pub stage: &'a Stage,
+    pub(crate) capabilities: crate::PlaybackCapabilities,
     pub browser: &'a mut Browser,
     pub queue: &'a mut Queue,
     pub pane: Pane,
@@ -259,24 +260,36 @@ fn now_playing(view: &View, width: usize, rows: usize) -> Vec<Line<'static>> {
         width,
     ));
 
-    let modes = Line::from(vec![
-        Span::styled("shuffle ", Style::from(DIM())),
-        mode(
-            view.snap.shuffle,
-            if view.snap.shuffle { "on" } else { "off" },
-        ),
-        Span::styled("   repeat ", Style::from(DIM())),
-        mode(
-            !matches!(
-                view.snap.repeat,
-                slipmat_core::player::protocol::RepeatMode::None
+    let mut modes = Vec::new();
+    if view.capabilities.shuffle {
+        modes.extend([
+            Span::styled("shuffle ", Style::from(DIM())),
+            mode(
+                view.snap.shuffle,
+                if view.snap.shuffle { "on" } else { "off" },
             ),
-            repeat_text(view.snap),
-        ),
-        Span::styled("   vol ", Style::from(DIM())),
+            Span::raw("   "),
+        ]);
+    }
+    if view.capabilities.repeat {
+        modes.extend([
+            Span::styled("repeat ", Style::from(DIM())),
+            mode(
+                !matches!(
+                    view.snap.repeat,
+                    slipmat_core::player::protocol::RepeatMode::None
+                ),
+                repeat_text(view.snap),
+            ),
+            Span::raw("   "),
+        ]);
+    }
+    modes.extend([
+        Span::styled("vol ", Style::from(DIM())),
         Span::styled(meter(view.snap.volume, VOL, '█'), Style::from(ACCENT())),
         Span::styled(rest(view.snap.volume, VOL, '░'), Style::from(DIM())),
     ]);
+    let modes = Line::from(modes);
 
     let mut band = vec![name, title, album, Line::default()];
     band.extend(spectrum.into_iter().map(Line::from));

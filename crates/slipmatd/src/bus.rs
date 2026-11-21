@@ -27,12 +27,19 @@ pub fn start(daemon: &Rc<Daemon>) -> Mpris {
             tokio::task::spawn_local(fut);
         }),
         Rc::new(move |cmd| on_command(&sink, cmd)),
-        Capabilities::headless(),
+        Capabilities {
+            can_seek: !daemon.native_playback(),
+            ..Capabilities::headless()
+        },
     )
 }
 
 fn on_command(daemon: &Rc<Daemon>, cmd: MprisCommand) {
     if let MprisCommand::GoTo { index } = cmd {
+        if daemon.native_playback() {
+            daemon.send(Command::ChangeToIndex { index });
+            return;
+        }
         let planned = go_to(&daemon.model.borrow(), index);
         daemon.resume_at.set(None);
         daemon.restore_start.set(None);

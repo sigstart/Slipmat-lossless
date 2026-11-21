@@ -105,6 +105,7 @@ impl AppModel {
         let item = self.showing();
         let snap = Snapshot {
             shuffle: self.mirror.shuffle(),
+            capabilities: self.playback_capabilities,
             queue_open: self.show_queue,
             // The same breakpoint the header reads. The bar has less room than
             // the header does, so it stands three controls down rather than
@@ -304,13 +305,13 @@ impl AppModel {
     /// one* — so the second press falls into it by itself.
     pub(super) fn go_previous(&self) {
         match previous_means(self.mirror.snap.position_ms) {
-            Previous::Restart => {
+            Previous::Restart if self.playback_capabilities.seek => {
                 self.transport(Transport::Seek { position_ms: 0 });
                 // Same reasoning as `AppMsg::Seek`: a discontinuous move has to
                 // be announced, or controllers keep extrapolating from the old
                 // position and their progress bars drift.
             }
-            Previous::Track => self.transport(Transport::Previous),
+            Previous::Restart | Previous::Track => self.transport(Transport::Previous),
         }
     }
 }

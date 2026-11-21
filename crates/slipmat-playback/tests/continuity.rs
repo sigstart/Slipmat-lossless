@@ -1,0 +1,187 @@
+// SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+use std::{
+    io::{self, Cursor, Read, Write},
+    process::{Command, Stdio},
+};
+
+use slipmat_playback::{AlacDecoder, PcmFormat};
+
+const STEREO_16: &[u8] = include_bytes!("fixtures/stereo-16.m4a");
+const STEREO_16_NEXT: &[u8] = include_bytes!("fixtures/stereo-16-next.m4a");
+const STEREO_24: &[u8] = include_bytes!("fixtures/stereo-24.m4a");
+const STEREO_16_FRAGMENTED: &[u8] = include_bytes!("fixtures/stereo-16-fragmented.m4a");
+const STANDARD_PACKET_FRAMES: usize = 4096;
+
+fn open(bytes: &'static [u8]) -> AlacDecoder {
+    AlacDecoder::open(Box::new(Cursor::new(bytes))).unwrap()
+}
+
+fn check_frames(block: &[i32], start: usize, frames: usize, depth: u8, steps: [i32; 2]) {
+    assert_eq!(block.len(), frames * 2);
+    let minimum = -(1_i32 << (depth - 1));
+    let maximum = -minimum - 1;
+    for (offset, pair) in block.chunks_exact(2).enumerate() {
+        let frame = (start + offset) as i32;
+        assert_eq!(
+            pair,
+            [minimum + frame * steps[0], maximum - frame * steps[1]],
+            "frame {frame}",
+        );
+    }
+}
+
+#[test]
+fn decodes_exact_stereo_samples_across_packet_boundaries() {
+    for (fixture, rate, depth, tail, steps) in [
+        (STEREO_16, 44_100, 16, 3, [3, 7]),
+        (STEREO_24, 96_000, 24, 17, [19, 31]),
+    ] {
+        let mut decoder = open(fixture);
+        assert_eq!(
+            decoder.format(),
+            PcmFormat {
+                sample_rate: rate,
+                bits_per_sample: depth,
+                channels: 2
+            },
+        );
+        check_frames(
+            decoder.next_block().unwrap().unwrap(),
+            0,
+            STANDARD_PACKET_FRAMES,
+            depth,
+            steps,
+        );
+        check_frames(
+            decoder.next_block().unwrap().unwrap(),
+            STANDARD_PACKET_FRAMES,
+            tail,
+            depth,
+            steps,
+        );
+        assert!(decoder.next_block().unwrap().is_none());
+        assert!(decoder.next_block().unwrap().is_none());
+    }
+}
+
+#[test]
+fn hands_off_to_one_prefetched_block_without_losing_or_repeating_frames() {
+    let mut current = open(STEREO_16);
+    let mut next = open(STEREO_16_NEXT);
+    assert_eq!(current.format(), next.format());
+
+    check_frames(
+        current.next_block().unwrap().unwrap(),
+        0,
+        STANDARD_PACKET_FRAMES,
+        16,
+        [3, 7],
+    );
+
+    let tail = current.next_block().unwrap().unwrap();
+    let prefetched = next.next_block().unwrap().unwrap();
+    check_frames(tail, STANDARD_PACKET_FRAMES, 3, 16, [3, 7]);
+    assert!(current.next_block().unwrap().is_none());
+    check_frames(prefetched, 4099, STANDARD_PACKET_FRAMES, 16, [3, 7]);
+    check_frames(next.next_block().unwrap().unwrap(), 8195, 5, 16, [3, 7]);
+    assert!(next.next_block().unwrap().is_none());
+}
+
+#[test]
+fn truncated_media_reports_an_error_instead_of_clean_eof() {
+    let mut decoder = open(&STEREO_16[..STEREO_16.len() - 1]);
+    loop {
+        match decoder.next_block() {
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("truncated media returned clean EOF"),
+            Err(_) => break,
+        }
+    }
+    assert!(decoder.next_block().unwrap().is_none());
+}
+
+#[test]
+fn streams_exact_pcm_across_non_seekable_fragments() {
+    struct ShortReads(&'static [u8]);
+
+    impl Read for ShortReads {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let limit = buf.len().min(37);
+            self.0.read(&mut buf[..limit])
+        }
+    }
+
+    let mut decoder = AlacDecoder::open_fragmented(ShortReads(STEREO_16_FRAGMENTED)).unwrap();
+
+    assert_eq!(
+        decoder.format(),
+        PcmFormat {
+            sample_rate: 44_100,
+            bits_per_sample: 16,
+            channels: 2
+        }
+    );
+    check_frames(
+        decoder.next_block().unwrap().unwrap(),
+        0,
+        STANDARD_PACKET_FRAMES,
+        16,
+        [3, 7],
+    );
+    check_frames(
+        decoder.next_block().unwrap().unwrap(),
+        STANDARD_PACKET_FRAMES,
+        3,
+        16,
+        [3, 7],
+    );
+    assert!(decoder.next_block().unwrap().is_none());
+}
+
+#[test]
+fn rejects_truncated_fragmented_streams() {
+    let last_mdat = STEREO_16_FRAGMENTED
+        .windows(4)
+        .rposition(|kind| kind == b"mdat")
+        .unwrap()
+        - 4;
+    let mut partial_header = STEREO_16_FRAGMENTED.to_vec();
+    partial_header.extend_from_slice(&[0, 0, 0, 8, b'f']);
+    for input in [
+        &STEREO_16_FRAGMENTED[..last_mdat],
+        &STEREO_16_FRAGMENTED[..STEREO_16_FRAGMENTED.len() - 1],
+        &partial_header,
+    ] {
+        let mut decoder = AlacDecoder::open_fragmented(Cursor::new(input.to_vec())).unwrap();
+        assert!(decoder.next_block().unwrap().is_some());
+        loop {
+            match decoder.next_block() {
+                Ok(Some(_)) => {}
+                Ok(None) => panic!("truncated fragmented media returned clean EOF"),
+                Err(_) => break,
+            }
+        }
+    }
+}
+
+#[test]
+fn stdin_output_rejects_invalid_input_before_opening_pulse() {
+    for input in [&[][..], b"invalid M4A stream", STEREO_16] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_fairplay-alac-output"))
+            .arg("/unused/pulse/native")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(input).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("reading MP4"), "{error}");
+        assert!(!error.contains("opening PulseAudio output"), "{error}");
+    }
+}

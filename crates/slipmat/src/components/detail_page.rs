@@ -147,6 +147,7 @@ pub struct DetailPage {
     subtitle: gtk::Label,
     meta: gtk::Label,
     actions: gtk::Box,
+    shuffle: gtk::Button,
     error: adw::StatusPage,
     empty: adw::StatusPage,
 }
@@ -336,9 +337,14 @@ impl DetailPage {
             subtitle,
             meta,
             actions,
+            shuffle,
             error,
             empty,
         }
+    }
+
+    pub fn set_shuffle_supported(&self, supported: bool) {
+        self.shuffle.set_sensitive(supported);
     }
 
     pub fn widget(&self) -> &adw::NavigationPage {

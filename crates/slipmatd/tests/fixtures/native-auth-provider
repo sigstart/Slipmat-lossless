@@ -1,0 +1,46 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 Miguel Rincon
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+set -eu
+IFS= read -r frame
+[ "$frame" = '{"type":"begin"}' ] || exit 1
+printf '%s\n' '{"type":"credentialsRequired"}'
+IFS= read -r frame
+case "$frame" in
+    *'"account":"reject@example.invalid"'*)
+        printf '%s\n' '{"type":"rejected"}'
+        exit 0
+        ;;
+    *'"account":"crash@example.invalid"'*) exit 23 ;;
+    *'"account":"test@example.invalid"'*'"password":"fixture-password"'*) ;;
+    *) exit 1 ;;
+esac
+printf '%s\n' '{"type":"verificationRequired"}'
+IFS= read -r frame
+[ "$frame" = '{"type":"verificationCode","code":"123456"}' ] || exit 1
+printf '%s\n' '{"type":"signedIn"}'
+while IFS= read -r frame; do
+    case "$frame" in
+        '{"type":"playTrack","track_id":"123"}')
+            printf '%s\n' '{"type":"played","sample_rate":44100,"bits_per_sample":24,"channels":2}'
+            ;;
+        '{"type":"playTrack","track_id":"456"}')
+            printf '%s\n' '{"type":"licenceDenied"}'
+            ;;
+        '{"type":"playTrack","track_id":"789"}')
+            printf '%s\n' '{"type":"trialFailed","stage":"output"}'
+            ;;
+        '{"type":"playTrack","track_id":"111"}')
+            printf '%s\n' '{"type":"failed"}'
+            ;;
+        '{"type":"playTrack","track_id":"222"}')
+            printf '%s\n' '{"type":"trialFailed","stage":"fixture-private-detail"}'
+            ;;
+        '{"type":"playTrack","track_id":"999"}')
+            /bin/sleep 600 &
+            wait "$!"
+            ;;
+        *) exit 1 ;;
+    esac
+done

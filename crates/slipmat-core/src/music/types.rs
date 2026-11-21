@@ -99,6 +99,10 @@ impl Artwork {
         }
     }
 
+    pub fn template(&self) -> &str {
+        &self.template
+    }
+
     /// A concrete URL at `size`×`size`.
     ///
     /// Handles `{w}`/`{h}` and the `{f}` format placeholder some responses

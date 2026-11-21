@@ -9,10 +9,10 @@
 //! is rule 3 reaching the third layer, and it is what keeps a terminal and a
 //! GTK window from disagreeing about what is playing.
 //!
-//! **It needs a graphical session.** Not for itself — for the Chromium the
-//! daemon runs, which wants a display server even with its window hidden. That
-//! is Widevine, not a shortcut, and it is why this cannot run over plain SSH.
+//! Library browsing needs a graphical session for the daemon's Chromium
+//! sidecar. The shared native playback worker handles the audio.
 
+mod auth;
 mod browser;
 mod link;
 mod queue;
@@ -83,9 +83,29 @@ impl Notice {
     }
 }
 
+#[derive(Clone, Copy)]
+struct PlaybackCapabilities {
+    seek: bool,
+    shuffle: bool,
+    repeat: bool,
+}
+
+impl Default for PlaybackCapabilities {
+    fn default() -> Self {
+        Self {
+            seek: true,
+            shuffle: true,
+            repeat: true,
+        }
+    }
+}
+
 struct App {
     snap: Snapshot,
     stage: Stage,
+    native_sign_in_required: bool,
+    native_playback: bool,
+    capabilities: PlaybackCapabilities,
     browser: browser::Browser,
     queue: queue::Queue,
     pane: Pane,
@@ -105,6 +125,9 @@ impl Default for App {
         Self {
             snap: Snapshot::default(),
             stage: Stage::default(),
+            native_sign_in_required: false,
+            native_playback: false,
+            capabilities: PlaybackCapabilities::default(),
             browser: browser::Browser::default(),
             queue: queue::Queue::default(),
             pane: Pane::default(),
@@ -118,9 +141,14 @@ impl Default for App {
 }
 
 fn main() -> Result<()> {
+    let auth = auth::Command::parse(std::env::args_os().skip(1))?;
+
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
+    if let Some(command) = auth {
+        return runtime.block_on(auth::run(command));
+    }
     let result = runtime.block_on(run());
 
     // Restored whatever happened: a panic that leaves the terminal in raw mode
@@ -168,6 +196,7 @@ async fn run() -> Result<()> {
                     ui::View {
                         snap: &app.snap,
                         stage: &app.stage,
+                        capabilities: app.capabilities,
                         pane: app.pane,
                         typing: app.browser.typing,
                         catalog: app.browser.showing.is_catalog() || app.browser.from_catalog,
@@ -178,6 +207,10 @@ async fn run() -> Result<()> {
                             .message
                             .as_ref()
                             .map(|n| (n.text.as_str(), n.bad))
+                            .or_else(|| {
+                                app.native_sign_in_required
+                                    .then_some(("Run climat sign-in", false))
+                            })
                             .or_else(|| {
                                 app.refreshing_library
                                     .then_some(("Refreshing library…", false))
@@ -310,14 +343,18 @@ fn on_key(key: KeyEvent, link: &link::Link, app: &mut App) -> bool {
         KeyCode::Char(' ') => link.send(Request::Transport(Transport::PlayPause)),
         KeyCode::Char('z') => link.send(Request::Transport(Transport::Previous)),
         KeyCode::Char('b') => link.send(Request::Transport(Transport::Next)),
-        KeyCode::Left => seek(link, app, -5_000),
-        KeyCode::Right => seek(link, app, 5_000),
-        KeyCode::Char('s') => link.send(Request::Transport(Transport::SetShuffle {
-            shuffle: !app.snap.shuffle,
-        })),
-        KeyCode::Char('r') => link.send(Request::Transport(Transport::SetRepeat {
-            mode: next_repeat(app.snap.repeat),
-        })),
+        KeyCode::Left if app.capabilities.seek => seek(link, app, -5_000),
+        KeyCode::Right if app.capabilities.seek => seek(link, app, 5_000),
+        KeyCode::Char('s') if app.capabilities.shuffle => {
+            link.send(Request::Transport(Transport::SetShuffle {
+                shuffle: !app.snap.shuffle,
+            }))
+        }
+        KeyCode::Char('r') if app.capabilities.repeat => {
+            link.send(Request::Transport(Transport::SetRepeat {
+                mode: next_repeat(app.snap.repeat),
+            }))
+        }
         KeyCode::Char('R') if matches!(app.stage, Stage::Ready) => {
             link.send(Request::Refresh);
             app.refreshing_library = true;
@@ -738,20 +775,36 @@ fn seek(link: &link::Link, app: &App, delta: i64) {
 
 impl App {
     fn clear_account_state(&mut self) {
-        self.snap = Snapshot {
-            volume: self.snap.volume,
-            ..Default::default()
-        };
         self.browser.clear_account_state();
-        self.queue = queue::Queue::default();
-        self.pane = Pane::Browser;
         self.message = None;
         self.refreshing_library = false;
-        self.bars = [0.0; spectrum::BANDS];
+        if !self.native_playback {
+            self.snap = Snapshot {
+                volume: self.snap.volume,
+                ..Default::default()
+            };
+            self.queue = queue::Queue::default();
+            self.pane = Pane::Browser;
+            self.bars = [0.0; spectrum::BANDS];
+        }
     }
 
     fn on_event(&mut self, event: Event, link: &link::Link) {
         match event {
+            Event::NativeSignIn { required } => self.native_sign_in_required = required,
+            Event::PlaybackCapabilities {
+                native,
+                seek,
+                shuffle,
+                repeat,
+            } => {
+                self.native_playback = native;
+                self.capabilities = PlaybackCapabilities {
+                    seek,
+                    shuffle,
+                    repeat,
+                };
+            }
             Event::Snapshot(snap) => {
                 // Stopping clears the bars at once rather than leaving the
                 // last frame to decay over whatever the machine plays next.
@@ -877,6 +930,61 @@ mod tests {
             requests.try_recv().expect("sign-in request"),
             Request::SignIn
         ));
+    }
+
+    #[test]
+    fn capabilities_disable_transport_keys_that_default_to_enabled() {
+        let (link, mut requests) = link::Link::channel();
+        let mut app = App::default();
+        let keys = [
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Char('s'),
+            KeyCode::Char('r'),
+        ];
+        for code in keys {
+            assert!(on_key(
+                KeyEvent::new(code, KeyModifiers::NONE),
+                &link,
+                &mut app
+            ));
+            assert!(matches!(requests.try_recv(), Ok(Request::Transport(_))));
+        }
+        app.on_event(
+            Event::PlaybackCapabilities {
+                native: true,
+                seek: false,
+                shuffle: false,
+                repeat: false,
+            },
+            &link,
+        );
+        for code in keys {
+            assert!(on_key(
+                KeyEvent::new(code, KeyModifiers::NONE),
+                &link,
+                &mut app
+            ));
+            assert!(requests.try_recv().is_err());
+        }
+        let play = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+        assert!(on_key(play, &link, &mut app));
+        assert!(matches!(
+            requests.try_recv(),
+            Ok(Request::Transport(Transport::PlayPause))
+        ));
+    }
+
+    #[test]
+    fn native_sign_in_notice_survives_library_stage_updates() {
+        let (link, _) = link::Link::channel();
+        let mut app = App::default();
+        app.on_event(Event::NativeSignIn { required: true }, &link);
+        app.on_event(Event::Stage(Stage::SignedOut), &link);
+        app.on_event(Event::Stage(Stage::Ready), &link);
+        assert!(app.native_sign_in_required);
+        app.on_event(Event::NativeSignIn { required: false }, &link);
+        assert!(!app.native_sign_in_required);
     }
 
     #[test]

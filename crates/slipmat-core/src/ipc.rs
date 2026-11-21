@@ -416,6 +416,18 @@ pub enum Transport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event")]
 pub enum Event {
+    /// Whether the selected queue item is waiting for native authentication.
+    #[serde(rename = "nativeSignIn")]
+    NativeSignIn { required: bool },
+
+    #[serde(rename = "playbackCapabilities")]
+    PlaybackCapabilities {
+        native: bool,
+        seek: bool,
+        shuffle: bool,
+        repeat: bool,
+    },
+
     /// What is playing and how. The one a bar redraws from.
     #[serde(rename = "snapshot")]
     Snapshot(Snapshot),

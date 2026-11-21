@@ -222,7 +222,8 @@ impl PlayerView {
         ));
         bits.scale
             .set_range(0.0, self.snap.duration_ms.max(1) as f64);
-        bits.scale.set_sensitive(self.snap.duration_ms > 0);
+        bits.scale
+            .set_sensitive(self.snap.capabilities.seek && self.snap.duration_ms > 0);
         // Only when it is not the user's: a drag must not be argued with.
         if !self.scrubbing {
             bits.scale.set_value(self.snap.position_ms as f64);
@@ -234,7 +235,9 @@ impl PlayerView {
         });
         bits.play.set_sensitive(self.snap.active);
         bits.previous.set_sensitive(self.snap.has_previous);
+        bits.shuffle.set_sensitive(self.snap.capabilities.shuffle);
         bits.shuffle.set_opacity(mode_opacity(self.snap.shuffle));
+        bits.repeat.set_sensitive(self.snap.capabilities.repeat);
         bits.repeat.set_icon_name(match self.snap.repeat {
             RepeatMode::One => "media-playlist-repeat-song-symbolic",
             _ => "media-playlist-repeat-symbolic",

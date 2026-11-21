@@ -1,0 +1,5 @@
+908b2b98134ef87ba68d083003a15caf5e05235ff4ab8df9c1e3a25bd2f770b6  compat/libhybris-core.so
+b5725b3be908425d028d82b0f549fea5dba396cc3f1ad98bcd5ec9a86ab0b10c  compat/q.so
+9a588ddf89e56ff95082d487b87ddd31c08fc69d4268de71fee76565a6d3fffc  rootfs/system/lib64/libandroid.so
+7e5e7d8adf99dbbf14963fb813a79212f79a199352e5b39e1252a001d0917441  rootfs/system/lib64/libOpenSLES.so
+36a48cdb8f8d1289156747973e8e59a0d8b077a55ac35bbbbeff48aed9387cd3  rootfs/system/lib64/libdl.so

@@ -291,13 +291,17 @@ fn electron_binary(sidecar: &Path) -> Result<PathBuf> {
 ///
 /// The receiver ends with exactly one `Incoming::Died`, which is `app/mod.rs`'s cue
 /// to restart with backoff.
-pub fn spawn() -> Result<(Handle, mpsc::UnboundedReceiver<Incoming>)> {
+pub fn spawn(metadata_only: bool) -> Result<(Handle, mpsc::UnboundedReceiver<Incoming>)> {
     let dir = locate()?;
     let bin = electron_binary(&dir)?;
     tracing::info!(sidecar = %dir.display(), "spawning");
 
     let mut child = TokioCommand::new(&bin)
         .arg(".")
+        .env(
+            "SLIPMAT_METADATA_ONLY",
+            if metadata_only { "1" } else { "0" },
+        )
         .current_dir(&dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

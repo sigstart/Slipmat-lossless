@@ -657,6 +657,10 @@ impl SimpleComponent for PlayerView {
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
         match msg {
             PlayerViewInput::Sync(snap) => {
+                if !snap.capabilities.seek && self.scrubbing {
+                    self.scrubbing = false;
+                    self.scrub_gen = self.scrub_gen.wrapping_add(1);
+                }
                 // While dragging, the position is the user's, not the player's.
                 let position = if self.scrubbing {
                     self.snap.position_ms
@@ -675,6 +679,9 @@ impl SimpleComponent for PlayerView {
                 None => self.cover.empty_sleeve(self.art_px.get()),
             },
             PlayerViewInput::Scrub(v) => {
+                if !self.snap.capabilities.seek {
+                    return;
+                }
                 self.scrubbing = true;
                 self.snap.position_ms = v as u64;
                 self.refresh_transport();

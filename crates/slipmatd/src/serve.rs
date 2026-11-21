@@ -15,11 +15,11 @@ use slipmat_core::ipc::{
 };
 use slipmat_core::music::client::Client;
 use slipmat_core::music::types::Artwork;
-use slipmat_core::player::protocol::{Command, Event as PlayerEvent, PlaybackState};
+use slipmat_core::player::protocol::{Command, Event as PlayerEvent, Item, PlaybackState};
 use slipmat_core::player::{Incoming, sidecar};
 use slipmat_core::queue::{Start, queue_from_ids, start_index, unresolvable_ids};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::{UnixListener, UnixStream, unix::OwnedWriteHalf};
 use tokio::sync::broadcast;
 
 use crate::bus;
@@ -51,6 +51,9 @@ const IDLE_CHECK: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub struct Daemon {
     pub model: RefCell<Model>,
+    native: Option<tokio::sync::mpsc::UnboundedSender<Command>>,
+    catalogue_items: RefCell<std::collections::HashMap<String, Item>>,
+    native_sign_in_required: std::cell::Cell<bool>,
     /// Replaced on every respawn, so everything holding an `Rc<Daemon>` keeps
     /// talking to whichever sidecar is alive now.
     pub sidecar: RefCell<Option<sidecar::Handle>>,
@@ -108,6 +111,26 @@ pub struct Daemon {
 
 impl Daemon {
     pub fn send(&self, cmd: Command) {
+        if let Some(native) = &self.native
+            && !matches!(
+                cmd,
+                Command::ShowLogin
+                    | Command::Hide
+                    | Command::Authorize
+                    | Command::SignOut
+                    | Command::RefreshTokens
+                    | Command::RemoveFromLibrary { .. }
+                    | Command::Unfavorite { .. }
+                    | Command::Quit
+            )
+        {
+            if native.send(cmd).is_err() {
+                self.publish(Event::Error {
+                    detail: "The native queue worker stopped.".into(),
+                });
+            }
+            return;
+        }
         match self.sidecar.borrow().as_ref() {
             Some(handle) => handle.send(cmd),
             // Only reachable in the moment between a client connecting and the
@@ -117,6 +140,45 @@ impl Daemon {
         }
     }
 
+    pub fn native_playback(&self) -> bool {
+        self.native.is_some()
+    }
+
+    pub(super) fn native_sign_in_required(&self) -> bool {
+        self.native_sign_in_required.get()
+    }
+
+    pub(super) fn require_native_sign_in(&self, required: bool) {
+        if self.native_sign_in_required.replace(required) != required {
+            self.publish(Event::NativeSignIn { required });
+        }
+    }
+
+    pub fn native_items(&self, songs: Vec<String>) -> Vec<Item> {
+        let model = self.model.borrow();
+        let library: std::collections::HashMap<_, _> = model
+            .library
+            .tracks
+            .iter()
+            .filter_map(|track| track.catalog_id.as_deref().map(|id| (id, track)))
+            .collect();
+        let catalogue = self.catalogue_items.borrow();
+        songs
+            .into_iter()
+            .map(|id| {
+                catalogue
+                    .get(&id)
+                    .cloned()
+                    .or_else(|| library.get(id.as_str()).map(|track| native_item(track)))
+                    .unwrap_or_else(|| Item {
+                        title: id.clone(),
+                        catalog_id: Some(id),
+                        ..Item::default()
+                    })
+            })
+            .collect()
+    }
+
     /// Buffering still needs the sidecar even with no client attached.
     fn wanted(&self) -> bool {
         let model = self.model.borrow();
@@ -124,9 +186,26 @@ impl Daemon {
     }
 
     pub fn publish(&self, event: Event) {
+        if self.native_playback()
+            && let Event::Results { entries, .. } | Event::Page { entries, .. } = &event
+        {
+            let mut catalogue = self.catalogue_items.borrow_mut();
+            for entry in entries {
+                if let Entry::Song(track) = entry
+                    && let Some(id) = &track.catalog_id
+                {
+                    catalogue.insert(id.clone(), native_item(track));
+                }
+            }
+        }
         // An error here means nobody is listening, which is the ordinary state
         // of a daemon with no client attached.
         let _ = self.events.send(event);
+    }
+
+    fn publish_stage(&self, stage: Stage) {
+        self.model.borrow_mut().stage = stage.clone();
+        self.publish(Event::Stage(stage));
     }
 
     /// A client for Apple's API, if the tokens for one have arrived.
@@ -153,7 +232,7 @@ impl Daemon {
         ))
     }
 
-    fn publish_snapshot(&self) {
+    pub(super) fn publish_snapshot(&self) {
         self.publish(Event::Snapshot(self.model.borrow().snapshot()));
         if let Some(mpris) = self.mpris.borrow().as_ref() {
             mpris.update(bus::state(self));
@@ -161,7 +240,24 @@ impl Daemon {
     }
 }
 
-pub async fn run() -> Result<()> {
+fn native_item(track: &slipmat_core::music::types::Track) -> Item {
+    Item {
+        id: track
+            .library_id
+            .clone()
+            .or_else(|| Some(track.id.0.clone())),
+        catalog_id: track.catalog_id.clone(),
+        title: track.title.clone(),
+        artist: track.artist.clone(),
+        album: track.album.clone(),
+        duration_ms: track.duration_ms,
+        track_number: track.track_number,
+        artwork_template: track.artwork.as_ref().map(|art| art.template().to_owned()),
+        ..Item::default()
+    }
+}
+
+pub async fn run(provider: Option<std::path::PathBuf>, native: bool) -> Result<()> {
     let path = ipc::socket_path().context("XDG_RUNTIME_DIR is not set")?;
 
     // **Ask before removing.** A socket file outlives the process that made it,
@@ -183,11 +279,33 @@ pub async fn run() -> Result<()> {
     let listener = UnixListener::bind(&path).with_context(|| format!("binding {path:?}"))?;
     tracing::info!(socket = %path.display(), "listening");
 
-    let (handle, mut incoming) = sidecar::spawn().context("spawning the sidecar")?;
+    let native_auth = match provider {
+        Some(provider) => match crate::native_auth::Endpoint::bind(provider).await {
+            Ok(endpoint) => Some(endpoint),
+            Err(err) => {
+                tracing::warn!(%err, "native sign-in socket unavailable");
+                None
+            }
+        },
+        None => None,
+    };
+    let (handle, mut incoming) = match sidecar::spawn(native) {
+        Ok((handle, incoming)) => (Some(handle), incoming),
+        Err(err) if native => {
+            tracing::warn!(%err, "catalogue sidecar unavailable");
+            let (_, incoming) = tokio::sync::mpsc::unbounded_channel();
+            (None, incoming)
+        }
+        Err(err) => return Err(err.context("spawning the sidecar")),
+    };
     let (events, _) = broadcast::channel(BACKLOG);
+    let (native_sender, native_receiver) = tokio::sync::mpsc::unbounded_channel();
     let daemon = Rc::new(Daemon {
         model: RefCell::new(Model::new()),
-        sidecar: RefCell::new(Some(handle)),
+        native: native.then_some(native_sender),
+        catalogue_items: RefCell::new(Default::default()),
+        native_sign_in_required: std::cell::Cell::new(false),
+        sidecar: RefCell::new(handle),
         events,
         restored: std::cell::Cell::new(false),
         restarts: std::cell::Cell::new(0),
@@ -213,6 +331,17 @@ pub async fn run() -> Result<()> {
     // After the `Rc` exists: MPRIS holds one so a button on a bar can reach the
     // sidecar.
     *daemon.mpris.borrow_mut() = Some(bus::start(&daemon));
+    if native {
+        let service = native_auth
+            .as_ref()
+            .map(crate::native_auth::Endpoint::service);
+        tokio::task::spawn_local(crate::native_queue::run(
+            daemon.clone(),
+            service,
+            native_receiver,
+        ));
+        restore_session(&daemon);
+    }
 
     // Accept loop: one task per client, each holding a handle to the daemon.
     let accepting = daemon.clone();
@@ -264,13 +393,17 @@ pub async fn run() -> Result<()> {
             if moved {
                 ticking.model.borrow_mut().volume = outside.unwrap_or_default();
             }
-            if moved || ticking.model.borrow().player.state.is_playing() {
+            if moved
+                || (!ticking.native_playback() && ticking.model.borrow().player.state.is_playing())
+            {
                 ticking.publish_snapshot();
             }
             // On every tick, not only the playing ones: a stall is measured
             // against a position that has stopped moving, and the state that
             // says so is exactly the one that stops publishing.
-            watchdog::check(&ticking, &mut watch);
+            if !ticking.native_playback() {
+                watchdog::check(&ticking, &mut watch);
+            }
         }
     });
 
@@ -306,8 +439,7 @@ pub async fn run() -> Result<()> {
             // Dropping the handle closes the child's stdin, which is the
             // shutdown signal `main.js` waits on; `kill_on_drop` is the backstop.
             idling.sidecar.borrow_mut().take();
-            idling.model.borrow_mut().stage = Stage::Connecting;
-            idling.publish(Event::Stage(Stage::Connecting));
+            idling.publish_stage(Stage::Connecting);
         }
     });
 
@@ -338,6 +470,7 @@ pub async fn run() -> Result<()> {
         // The socket outlives the process that made it, and a leftover one
         // answers for a daemon that is not running.
         let _ = std::fs::remove_file(&socket);
+        drop(native_auth);
         std::process::exit(0);
     });
 
@@ -354,7 +487,9 @@ pub async fn run() -> Result<()> {
                 }
                 Incoming::Died(why) => {
                     tracing::error!(%why, "sidecar died");
-                    daemon.publish(Event::Stage(Stage::Broken { detail: why }));
+                    if !daemon.idle.get() {
+                        daemon.publish_stage(Stage::Broken { detail: why });
+                    }
                     break;
                 }
             }
@@ -368,13 +503,12 @@ pub async fn run() -> Result<()> {
         // as a wedge. That restarted a healthy replacement every twelve
         // seconds, forever. The queue and position are untouched; only the
         // claim to be playing goes.
-        daemon.model.borrow_mut().player.state = PlaybackState::None;
-        daemon.restart_at.borrow_mut().take();
-        daemon.publish_snapshot();
-
-        // Written from the live mirror, not from what was on disk: a crash
-        // mid-track should come back to that track, not to last night's.
-        save_session(&daemon);
+        if !daemon.native_playback() {
+            daemon.model.borrow_mut().player.state = PlaybackState::None;
+            daemon.restart_at.borrow_mut().take();
+            daemon.publish_snapshot();
+            save_session(&daemon);
+        }
 
         // Put down on purpose: wait to be asked rather than backing off, and do
         // not count it as a failure.
@@ -392,24 +526,22 @@ pub async fn run() -> Result<()> {
             tracing::warn!(attempt, ?delay, "restarting the sidecar");
             tokio::time::sleep(delay).await;
         }
-        daemon.publish(Event::Stage(Stage::Connecting));
-
-        match sidecar::spawn() {
+        match sidecar::spawn(daemon.native_playback()) {
             Ok((handle, rx)) => {
                 *daemon.sidecar.borrow_mut() = Some(handle);
                 // The new child holds nothing, so the session goes back in once
                 // MusicKit attaches to it.
                 daemon.restored.set(false);
-                daemon.model.borrow_mut().stage = Stage::Connecting;
+                daemon.publish_stage(Stage::Connecting);
                 incoming = rx;
             }
             Err(err) => {
                 // Reported down the same path as a crash, so there is one
                 // recovery route rather than two.
                 tracing::error!(?err, "could not respawn the sidecar");
-                daemon.publish(Event::Stage(Stage::Broken {
+                daemon.publish_stage(Stage::Broken {
                     detail: err.to_string(),
-                }));
+                });
             }
         }
     }
@@ -483,7 +615,7 @@ fn retry_without_dead_tracks(daemon: &Daemon, detail: &str) -> bool {
 /// one that matters: a crash is exactly when nobody gets to save anything, so
 /// the worst case is coming back to the start of the right track rather than to
 /// nothing at all.
-fn save_session(daemon: &Daemon) {
+pub(super) fn save_session(daemon: &Daemon) {
     let model = daemon.model.borrow();
     let songs: Vec<String> = model
         .player
@@ -508,6 +640,20 @@ fn save_session(daemon: &Daemon) {
 }
 
 fn on_event(daemon: &Rc<Daemon>, event: PlayerEvent) {
+    if daemon.native_playback()
+        && !matches!(
+            event,
+            PlayerEvent::HookReady { .. }
+                | PlayerEvent::Authorization { .. }
+                | PlayerEvent::SignedOut
+                | PlayerEvent::HookFailed { .. }
+                | PlayerEvent::Tokens(_)
+                | PlayerEvent::LibraryWrite { .. }
+                | PlayerEvent::Error { .. }
+        )
+    {
+        return;
+    }
     // The name, not the payload: a `NowPlaying` carries the whole queue, and
     // 112 items per line is not observability.
     tracing::debug!(event = event_name(&event), "sidecar event");
@@ -529,21 +675,18 @@ fn on_event(daemon: &Rc<Daemon>, event: PlayerEvent) {
         PlayerEvent::Authorization { authorized } => set_authorization(daemon, *authorized),
         PlayerEvent::SignedOut => set_authorization(daemon, false),
         PlayerEvent::HookFailed { detail } => {
-            let stage = Stage::Broken {
+            daemon.publish_stage(Stage::Broken {
                 detail: detail.clone(),
-            };
-            daemon.model.borrow_mut().stage = stage.clone();
-            daemon.publish(Event::Stage(stage));
+            });
         }
-        PlayerEvent::Error { detail, .. } => {
-            // A refused queue is worth healing rather than reporting: `setQueue`
-            // is all-or-nothing, so one delisted track makes a whole playlist
-            // unplayable and the person can do nothing about it.
-            if !retry_without_dead_tracks(daemon, detail) {
-                daemon.publish(Event::Error {
-                    detail: detail.clone(),
-                });
-            }
+        // One delisted track can fail the entire queue. Try removing it
+        // before surfacing the error.
+        PlayerEvent::Error { detail, .. }
+            if daemon.native_playback() || !retry_without_dead_tracks(daemon, detail) =>
+        {
+            daemon.publish(Event::Error {
+                detail: detail.clone(),
+            });
         }
         // Older installed sidecars still report MusicKit's persisted gain.
         // The desktop stream owns volume now, so accepting this would let a
@@ -665,12 +808,11 @@ fn set_authorization(daemon: &Rc<Daemon>, authorized: bool) {
     }
 
     let restore = !daemon.restored.replace(true);
-    daemon.model.borrow_mut().stage = Stage::Ready;
-    daemon.publish(Event::Stage(Stage::Ready));
+    daemon.publish_stage(Stage::Ready);
     daemon.send(Command::Hide);
     // Once per run: the hook re-attaches on every navigation, and a second
     // restore would throw away whatever is playing by then.
-    if restore {
+    if restore && !daemon.native_playback() {
         restore_session(daemon);
     }
     maybe_refresh_library(daemon);
@@ -678,6 +820,16 @@ fn set_authorization(daemon: &Rc<Daemon>, authorized: bool) {
 
 fn clear_account_state(daemon: &Daemon) {
     let mut model = daemon.model.borrow_mut();
+    if daemon.native_playback() {
+        model.tokens = None;
+        model.library = Library::default();
+        drop(model);
+        daemon.catalogue_items.borrow_mut().clear();
+        slipmat_core::library_cache::clear();
+        daemon.publish_stage(Stage::SignedOut);
+        daemon.publish(Event::LibraryChanged);
+        return;
+    }
     model.clear_account_state();
     model.stage = Stage::SignedOut;
     drop(model);
@@ -715,6 +867,7 @@ async fn client(stream: UnixStream, daemon: Rc<Daemon>) -> Result<()> {
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     let mut feed: Option<broadcast::Receiver<Event>> = None;
+    let mut sent_capabilities = false;
 
     loop {
         // Either the client says something, or — once subscribed — the daemon
@@ -729,11 +882,36 @@ async fn client(stream: UnixStream, daemon: Rc<Daemon>) -> Result<()> {
         };
 
         if let Some(event) = outgoing {
-            let mut line = serde_json::to_vec(&event)?;
-            line.push(b'\n');
-            write.write_all(&line).await?;
+            write_event(&mut write, &event).await?;
+        }
+        if daemon.native_playback() && feed.is_some() && !sent_capabilities {
+            write_event(
+                &mut write,
+                &Event::PlaybackCapabilities {
+                    native: true,
+                    seek: false,
+                    shuffle: false,
+                    repeat: false,
+                },
+            )
+            .await?;
+            write_event(
+                &mut write,
+                &Event::NativeSignIn {
+                    required: daemon.native_sign_in_required(),
+                },
+            )
+            .await?;
+            sent_capabilities = true;
         }
     }
+}
+
+async fn write_event(write: &mut OwnedWriteHalf, event: &Event) -> Result<()> {
+    let mut line = serde_json::to_vec(event)?;
+    line.push(b'\n');
+    write.write_all(&line).await?;
+    Ok(())
 }
 
 /// Wait on the event feed, or forever if this client has not subscribed.
@@ -754,12 +932,12 @@ fn answer(
 ) -> Option<Event> {
     let request: Request = match serde_json::from_str(line) {
         Ok(request) => request,
-        Err(err) => {
+        Err(_) => {
             // Loudly, per rule 4: a client sending something we cannot read is
             // a version mismatch, and silence would make it look like a hang.
-            tracing::warn!(%line, ?err, "unreadable request");
+            tracing::warn!("unreadable request");
             return Some(Event::Error {
-                detail: format!("unreadable request: {err}"),
+                detail: "Unreadable daemon request.".into(),
             });
         }
     };
@@ -780,6 +958,10 @@ fn answer(
             Some(Event::Queue { items, position })
         }
         Request::JumpTo { index } => {
+            if daemon.native_playback() {
+                daemon.send(Command::ChangeToIndex { index });
+                return None;
+            }
             // Nothing pending: there is no new queue to verify against.
             *daemon.pending_start.borrow_mut() = None;
             daemon.restart_at.borrow_mut().take();
@@ -872,6 +1054,10 @@ fn answer(
             None
         }
         Request::RemoveFromQueue { index } => {
+            if daemon.native_playback() {
+                daemon.send(Command::RemoveFromQueue { index });
+                return None;
+            }
             // **MusicKit will not remove the track it is playing**, and says
             // nothing when asked to: `queue.remove(current)` returns, fires no
             // event, and leaves the queue as it was. Measured on a five-track
@@ -888,6 +1074,10 @@ fn answer(
             None
         }
         Request::MoveInQueue { from, to } => {
+            if daemon.native_playback() {
+                daemon.send(Command::MoveInQueue { from, to });
+                return None;
+            }
             // Optimistic, like the GTK client's drag: the mirror moves now and
             // MusicKit's echo confirms it, so a client redrawing from the next
             // snapshot does not see the row spring back.
@@ -926,6 +1116,14 @@ fn answer(
 }
 
 pub(crate) fn route_transport(daemon: &Rc<Daemon>, transport: Transport) {
+    if daemon.native_playback()
+        && matches!(
+            transport,
+            Transport::Seek { .. } | Transport::SetShuffle { .. } | Transport::SetRepeat { .. }
+        )
+    {
+        return;
+    }
     if matches!(
         transport,
         Transport::Next | Transport::Previous | Transport::Seek { .. }
@@ -936,7 +1134,10 @@ pub(crate) fn route_transport(daemon: &Rc<Daemon>, transport: Transport) {
     }
     // A restored queue has no current item, so MusicKit's `play` does nothing
     // until the current queue entry has been opened.
-    if matches!(transport, Transport::Play | Transport::PlayPause) && needs_opening(daemon) {
+    if !daemon.native_playback()
+        && matches!(transport, Transport::Play | Transport::PlayPause)
+        && needs_opening(daemon)
+    {
         let index = daemon.model.borrow().player.queue_position;
         tracing::info!(index, "nothing is open yet — opening the queue first");
         daemon.send(Command::ChangeToIndex { index });
@@ -971,7 +1172,7 @@ pub(crate) fn route_transport(daemon: &Rc<Daemon>, transport: Transport) {
 /// **At most once per template.** A snapshot goes out twice a second and the
 /// cover changes at most once a track; refetching on every one would be a
 /// request per tick for a file already on disk.
-fn fetch_artwork(daemon: &Rc<Daemon>) {
+pub(super) fn fetch_artwork(daemon: &Rc<Daemon>) {
     let template = daemon
         .model
         .borrow()
@@ -1303,6 +1504,26 @@ fn open_page(daemon: &Rc<Daemon>, kind: PageKind, id: String) {
 /// which is the point of it living there. Two implementations would be two
 /// answers to "which song did they click".
 fn play(daemon: &Daemon, ids: &[String], index: usize, start: Start) {
+    if daemon.native_playback() {
+        let model = daemon.model.borrow();
+        let playable = |id: &&String| !model.dead_ids.contains(*id);
+        let songs: Vec<_> = ids.iter().filter(playable).cloned().collect();
+        let start_position = ids.iter().take(index).filter(playable).count();
+        drop(model);
+        if songs.is_empty() {
+            daemon.publish(Event::Error {
+                detail: "Nothing here can be streamed".into(),
+            });
+            return;
+        }
+        daemon.send(Command::SetQueue {
+            start_position: start_position.min(songs.len() - 1),
+            songs,
+            start_playing: true,
+            start_time_ms: 0,
+        });
+        return;
+    }
     let visible: Vec<Option<String>> = ids.iter().cloned().map(Some).collect();
     let row = if start.reorders() {
         // Shuffle: the entry point is the random part (#147).
@@ -1368,6 +1589,15 @@ fn restore_session(daemon: &Daemon) {
         return;
     };
     let start = session.start.min(session.songs.len().saturating_sub(1));
+    if daemon.native_playback() {
+        daemon.send(Command::SetQueue {
+            songs: session.songs,
+            start_position: start,
+            start_playing: false,
+            start_time_ms: 0,
+        });
+        return;
+    }
     tracing::info!(
         tracks = session.songs.len(),
         start,
@@ -1514,6 +1744,9 @@ mod tests {
         let (events, _) = broadcast::channel(8);
         Rc::new(Daemon {
             model: RefCell::new(Model::new()),
+            native: None,
+            catalogue_items: RefCell::new(Default::default()),
+            native_sign_in_required: std::cell::Cell::new(false),
             sidecar: RefCell::new(None),
             events,
             restored: std::cell::Cell::new(false),

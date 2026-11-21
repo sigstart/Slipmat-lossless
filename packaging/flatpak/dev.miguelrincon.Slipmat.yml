@@ -67,6 +67,8 @@ modules:
         skip:
           - target
           - sidecar/node_modules
+          - vendor/fairplay/x86_64/rootfs
+          - vendor/fairplay/x86_64/compat
           - .git
           - packaging/flatpak/.flatpak-builder
           - build-dir

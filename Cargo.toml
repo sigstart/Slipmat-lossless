@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/slipmat-core",
+    "crates/slipmat-playback",
     "crates/slipmatd",
     "crates/slipmat",
     "crates/climat",

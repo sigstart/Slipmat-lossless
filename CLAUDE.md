@@ -11,11 +11,9 @@ context and machine specifics; this file carries the project and its rules.
 felt disc between the platter and the record: the layer that sits between the
 mechanism and the music, and lets the record turn on its own terms.
 
-**Why this project exists.** Apple ships no Linux client, and the DRM makes a
-fully native one impossible — so the existing options load `music.apple.com` in
-an Electron window, which is a reasonable answer to a hard constraint. Slipmat
-takes a different one: draw the *interface natively* and keep the web engine
-present but never rendered. Cider and Sidra solved the DRM first and this
+**Why this project exists.** Apple ships no Linux client. Slipmat draws the
+interface natively and currently uses `music.apple.com` in a hidden Electron
+window for playback. Cider and Sidra solved the DRM first and this
 depends on their groundwork; the difference is where the boundary sits, not who
 did it right. **Never write about them with an edge** — in the README, in
 commits, or in reply to the user.
@@ -23,13 +21,34 @@ commits, or in reply to the user.
 **The headline feature is playback itself** — gapless transport with correct,
 bidirectional **MPRIS**. Build the rest in service of that.
 
-### The shape it is growing into
+## Target playback architecture
+
+Replace the Electron sidecar with a native Linux x86-64 FairPlay backend. Load
+the x86-64 FairPlay libraries through `libhybris`, including
+`libandroidappmusic.so`, `libCoreFP.so`, `libCoreLSKD.so`, `libCoreADI.so`,
+`libmediaplatform.so`, and `libstoreservicescore.so`. The full dependency
+inventory comes from Adam's
+[`drm/fairplay-libs.lock`](../INSPIRATION/apple-music-linux/drm/fairplay-libs.lock).
+
+The finished application must sign in, browse the catalogue and library, and
+play ALAC without Chromium, Electron, or Widevine in the build, packages, or
+runtime. GTK and CLImat continue to use `slipmatd` for playback control and
+status. Test natural queue advancement, gapless playback, and MPRIS against the
+new backend. See the [FairPlay spec](docs/specs/SPEC-fairplay-phase-1.md) and
+[licensed playback rules](#1-licensed-playback).
+
+The native backend is pending. Guidance below about the web sidecar, MusicKit
+JS, and Electron-specific packaging describes the current code during the
+migration.
+
+### Engine and clients
 
 The engine and the interface are separate concerns, and the interface is no
 longer only GTK:
 
-- **The sidecar** owns DRM playback. Hidden Chromium, singleton by construction —
-  one Widevine CDM, one profile lock. Everything else is a client of it.
+- **The playback backend** owns the playback session and audio output. The
+  existing implementation uses one hidden Chromium process with one Widevine
+  CDM and one profile lock.
 - **The GTK client** targets GNOME and should be indistinguishable from a
   first-party GNOME application. That is a rule *about this client*, not about
   the project: a design decision that would make it look like an Electron app or
@@ -40,23 +59,18 @@ longer only GTK:
 
 The practical test for new code: **would a client that draws nothing still need
 this?** If yes, it does not belong in `components/` or the reducer.
-## The constraint that shapes everything
+## The current Linux web playback backend
 
-Apple Music full-track playback is HLS + **Widevine** DRM (FairPlay only in
-Safari). Google ships its Linux CDM for x86_64 and aarch64 through Chromium's
-component updater.
+Slipmat's web sidecar plays HLS with **Widevine** DRM. Google ships its Linux
+CDM for x86_64 and aarch64 through Chromium's component updater.
 
 | Path                            | Verdict                                                        |
 | ------------------------------- | -------------------------------------------------------------- |
 | WebKitGTK + MusicKit JS         | **Dead.** Ships Clear Key only; no Widevine CDM.                |
 | Rust + GStreamer direct         | **Dead.** Cannot decrypt Widevine-protected HLS.                |
 | Stock Electron                  | **Dead.** `navigator.requestMediaKeySystemAccess` is absent.    |
-| `pywidevine` + an extracted CDM | **Rejected.** See rule 1. Out of scope, permanently.            |
+| `pywidevine` + an extracted CDM | Outside the licensed playback design in rule 1.                  |
 | **castLabs Electron (`wvcus`)** | **Works.** *Fetches* the CDM — see below. What Sidra uses.      |
-
-So a 100% native Apple Music player *cannot exist*. The honest ceiling — and the
-whole design — is: **everything the user sees is native; the audio decoder is
-invisible.**
 
 **`wvcus` does not ship the CDM — it fetches it.** The suffix is *Widevine CDM
 Update Service*: what castLabs adds is the plumbing that lets Chromium's own
@@ -179,11 +193,13 @@ Two Linux facts that follow, and that you must not design around:
 
 - **No VMP signing needed.** Linux Widevine reports `PLATFORM_UNVERIFIED`; the
   castLabs EVS account is a macOS/Windows concern. Nothing to sign.
-- **No persistent licences.** Therefore **Slipmat requires a network connection
-  to play, always. Offline and downloaded playback are impossible** — not a v1
-  cut, a permanent property of the platform. Never add a "download" affordance.
+- **No persistent Widevine licences.** The Linux web backend requires a
+  network connection for playback. Slipmat's playback interface is for streaming.
 
-## Stack (pinned — do not swap these out)
+## Stack
+
+Keep the existing dependencies pinned. The FairPlay prototype may add its own
+playback dependencies.
 
 | Layer          | Crate                  | Version                                    |
 | -------------- | ---------------------- | ------------------------------------------ |
@@ -220,24 +236,17 @@ the state belongs in a model and the change belongs in an `update()`.
 
 ## Hard rules
 
-### 1. The line we do not cross
+### 1. Licensed playback
 
-Slipmat plays through **Apple's own MusicKit player**, using **Google's official
-CDM**, inside a licensed session that requires an active Apple Music
-subscription. It is a native front-end and a remote control for a player that
-Apple ships.
+Playback requires an active Apple Music subscription and valid licences.
+Slipmat may use Apple's Android playback libraries through a native
+compatibility layer. The playback backend can decode and buffer audio in memory
+for immediate output. GTK, CLImat, and other clients exchange playback commands,
+metadata, and status with the backend.
 
-It does **not**, and will never:
-
-- strip or circumvent DRM;
-- use an extracted CDM (`pywidevine` and the `device_client_id_blob` /
-  `device_private_key` route that Music Assistant takes) — that means a Widevine
-  device blob pulled off a rooted Android phone;
-- persist, cache or re-encode decrypted audio;
-- implement downloading, ripping, or "export to MP3".
-
-If a request or a refactor heads that way, **name it and stop**. This is not a
-style preference; it is the reason the project can exist in the open.
+Preserve normal account authentication, subscription checks, and DRM licence
+enforcement. Keep content keys private to the DRM component. Keep decrypted
+tracks out of persistent caches, export interfaces, and client IPC.
 
 ### 2. Never trust your training data for `mpris-server` or MusicKit JS
 
@@ -249,10 +258,14 @@ MusicKit JS has three major versions in the wild with different surfaces, and
 `music.apple.com` ships whichever it likes. **Feature-detect, never assume** (see
 rule 4).
 
-### 3. MusicKit owns the queue. Rust mirrors it.
+### 3. The playback backend owns and advances the queue
 
 This is the single rule that makes gapless possible, and the easiest one to
 break by accident.
+
+The native FairPlay backend must advance the queue itself and report track and
+position changes to the daemon. The MusicKit calls below apply to the existing
+web implementation.
 
 MusicKit's gapless transition happens *inside its own queue advance*. If Rust
 feeds tracks one at a time — play a song, wait for `ended`, send the next — every
@@ -268,7 +281,7 @@ boundary gets a gap and the headline feature is gone.
 Update rows in place: reconcile by id, rebuild widgets only when membership
 actually changes.
 
-### 4. The injected hook script is the one fragile surface
+### 4. The web sidecar's injected hook
 
 `sidecar/preload.js` reaches into a page Apple can change without warning. Keep
 it **tiny and defensive**:
@@ -360,7 +373,7 @@ Rule 10 removes the crutch; this is why it is not missed.
 - Name for the domain, not the mechanism.
 - No abstraction before the third use.
 
-## Architecture
+## Current architecture and migration reference
 
 ```
 ┌──────────────────────────────────────────────────┐
@@ -1054,12 +1067,12 @@ engine, the library, catalog search, the queue view and MPRIS are all done and
 verified — the history of how is in the git log and the release notes, which is
 where it belongs rather than in a checklist nobody updates.
 
-What is worth knowing about the current shape is in **Architecture** below.
+See [current architecture and migration reference](#current-architecture-and-migration-reference).
 
 **Stay lean — flag the drift, don't gatekeep.** Not the default focus: lyrics,
 Discord presence, podcasts, radio, multi-account, an equaliser, scrobbling,
-cross-platform. Downloads and anything decrypting are not "later", they are
-rule 1. When a change drifts, **name the cost and the direction** so it is a
+cross-platform. Rule 1 defines the boundary for playback and media handling.
+When a change drifts, **name the cost and the direction** so it is a
 conscious choice — then build it if it genuinely earns its place.
 
 ### Lists, and where they live

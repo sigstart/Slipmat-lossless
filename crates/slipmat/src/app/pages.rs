@@ -167,6 +167,7 @@ impl AppModel {
             move || sidebar.input(AppMsg::ToggleSidebar),
         );
         page.set_end_controls(true);
+        page.set_shuffle_supported(self.playback_capabilities.shuffle);
 
         let pushed_onto = matches!(arrival, Arrival::PushedOnto);
         // **A sidebar destination has no back button.** `can_pop(false)` removes

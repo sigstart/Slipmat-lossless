@@ -33,7 +33,7 @@ use relm4::adw::prelude::*;
 use relm4::typed_view::list::TypedListView;
 use relm4::{Component, ComponentParts, ComponentSender, adw, gtk};
 
-use crate::components::now_playing::{RepeatButton, mode_opacity};
+use crate::components::now_playing::{PlaybackCapabilities, RepeatButton, mode_opacity};
 use reconcile::Key;
 use row::{Bound, QueueItem, Shared};
 use slipmat_core::player::protocol::RepeatMode;
@@ -132,6 +132,7 @@ pub struct QueueView {
     /// back and there is no binding to break.
     shuffle: bool,
     repeat: RepeatMode,
+    capabilities: PlaybackCapabilities,
     /// The visible position of the playing row, shared with every row so the
     /// marker can move without the store being touched.
     playing: Rc<Cell<Option<u32>>>,
@@ -203,6 +204,7 @@ pub enum QueueViewInput {
         shuffle: bool,
         repeat: RepeatMode,
     },
+    SetCapabilities(PlaybackCapabilities),
     /// No payload — the next value is derived from the mirrored one, so this
     /// view never invents one (rule 3).
     ShuffleClicked,
@@ -292,6 +294,8 @@ impl Component for QueueView {
                 pack_end = &gtk::Button {
                     set_icon_name: "media-playlist-shuffle-symbolic",
                     set_tooltip_text: Some("Shuffle"),
+                    #[watch]
+                    set_sensitive: model.capabilities.shuffle,
                     add_css_class: "flat",
                     #[watch]
                     set_opacity: mode_opacity(model.shuffle),
@@ -303,6 +307,8 @@ impl Component for QueueView {
                 pack_end = &gtk::Button {
                     add_css_class: "flat",
                     set_tooltip_text: Some("Repeat"),
+                    #[watch]
+                    set_sensitive: model.capabilities.repeat,
                     #[watch]
                     set_icon_name: match model.repeat {
                         RepeatMode::One => "media-playlist-repeat-song-symbolic",
@@ -393,6 +399,7 @@ impl Component for QueueView {
             rows: Vec::new(),
             shuffle: false,
             repeat: RepeatMode::default(),
+            capabilities: PlaybackCapabilities::default(),
             playing,
             collapsed,
             dragging: None,
@@ -440,6 +447,7 @@ impl Component for QueueView {
                 self.shuffle = shuffle;
                 self.repeat = repeat;
             }
+            QueueViewInput::SetCapabilities(capabilities) => self.capabilities = capabilities,
             QueueViewInput::ShuffleClicked => {
                 let _ = sender.output(QueueViewOutput::SetShuffle(!self.shuffle));
             }

@@ -37,29 +37,33 @@ and a window open at once are two views of one player rather than two players.
   [space] play/pause   [↑↓] move   [↵] play/open   [⇥] tabs   [/] filter   [Ctrl+C] hide   [q] quit
 ```
 
-## It needs a graphical session
-
-**This is the honest caveat, and it is not going away.** Apple Music's full
-tracks are Widevine-protected, and the only Widevine module on Linux ships
-inside Chromium. `slipmatd` therefore runs a hidden Chromium to decode audio,
-and Chromium wants a display server even with no window on screen.
-
-So `climat` runs in a terminal, but it needs that terminal to be on a machine
-with a desktop session — a terminal emulator under Wayland or X11, or `tmux`
-inside one. It will not work over a plain SSH connection to a headless box.
-That is a limit imposed by the DRM, not a shortcut taken here.
-
 ## First run
 
-When climat shows `[Enter] Sign in to Apple Music`, press `Enter`. Apple's
-sign-in window opens over the terminal. Complete the sign-in there; the window
-hides, climat loads your library, and the Apple session remains available on
-later starts.
+Run CLImat in a Wayland or X11 session for library browsing. When CLImat
+shows `[Enter] Sign in to Apple Music`, press Enter to open the web library
+sign-in window. Finish signing in and the daemon loads your library.
+
+In source builds, the normal Play action and queue use the shared native
+FairPlay and Symphonia backend. Prepare the provider before starting the daemon
+using the [source setup instructions](../../README.md#development).
+
+### Native authentication commands
+
+When CLImat shows `Run climat sign-in`, run that command from a second terminal.
+The queue starts the selected track after sign-in. The prompts hide your Apple Account, password, and verification codes
+as you type. Press `Ctrl+C` to cancel.
+
+`climat sign-in-status` reports whether a native Apple Music session is active,
+and `climat sign-out` ends the session. Run `climat` to open the player UI.
+
+With a native session active, `climat native-play <catalog-song-id>` runs the
+single-track playback trial. Use a decimal catalogue song ID. The command waits
+for playback to finish and prints the reported audio format. Press `Ctrl+C` to
+cancel playback.
 
 ## The bars
 
-climat never touches the audio — the sidecar owns the stream — so the
-visualiser *listens*, reading a monitor source, the loopback every output
+CLImat displays the visualiser by reading a monitor source, the loopback every output
 exposes. That is how `cava` and every other visualiser works, and it means the
 bars follow whatever is playing, including a track the GNOME window started.
 

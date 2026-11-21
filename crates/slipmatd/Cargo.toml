@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 # Volume lives on the audio server's stream, not inside MusicKit — see mixer.rs.
 libpulse-binding = { version = "2", default-features = false }
+libc = "0.2"
 slipmat-core = { path = "../slipmat-core" }
 
 anyhow.workspace = true

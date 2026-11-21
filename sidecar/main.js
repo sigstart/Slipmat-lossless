@@ -58,6 +58,11 @@ const DEBUG =
 /// protocol events it duplicates — `cmd-recv`, `cmd-done`, `cmd-queued` — are
 /// unaffected, and are what CLAUDE.md's "diagnose by layer" actually reads.
 const TRACE = process.env.SLIPMAT_SIDECAR_TRACE === '1'
+const METADATA_ONLY = process.env.SLIPMAT_METADATA_ONLY === '1'
+const METADATA_COMMANDS = new Set([
+  'showLogin', 'hide', 'quit', 'signOut', 'authorize', 'unauthorize',
+  'refreshTokens', 'removeFromLibrary', 'unfavorite',
+])
 const APPLE_MUSIC = 'https://music.apple.com/'
 /// Where the login lives. Named once because sign-out has to clear the very
 /// partition the window was created with — two spellings of this string is a
@@ -239,6 +244,8 @@ async function createWindow() {
     },
   })
 
+  if (METADATA_ONLY) win.webContents.setAudioMuted(true)
+
   // The page never navigates itself anywhere but Apple, and never opens
   // windows. Anything else (a support link, an ad) goes to the real browser.
   const allowed = (url) => {
@@ -267,7 +274,7 @@ async function createWindow() {
 
   // We need audio and nothing else. Deny the rest outright.
   win.webContents.session.setPermissionRequestHandler((_wc, permission, cb) => {
-    cb(permission === 'media')
+    cb(!METADATA_ONLY && permission === 'media')
   })
 
   // Signing in navigates the page, which tears down the old preload context
@@ -500,6 +507,7 @@ async function signOut() {
 }
 
 function dispatch(msg) {
+  if (METADATA_ONLY && !METADATA_COMMANDS.has(msg.cmd)) return
   // Handled here, not in the page.
   switch (msg.cmd) {
     case 'showLogin':
@@ -550,25 +558,27 @@ function drainPending() {
 // ---------------------------------------------------------------------------
 
 app.whenReady().then(async () => {
-  try {
-    // castLabs ECS: the Widevine CDM arrives through Chromium's component
-    // updater, so this can take a moment on first run and needs network.
-    // Creating a window before it resolves means EME is simply absent.
-    await components.whenReady()
-    log('widevine ready:', JSON.stringify(components.status()))
-    send({ event: 'widevine-ready' })
-  } catch (err) {
-    fail('widevine-unavailable', err)
-    // No CDM means no playback, ever. Say so and exit rather than pretend.
-    app.exit(1)
-    return
+  if (!METADATA_ONLY) {
+    try {
+      // castLabs ECS: the Widevine CDM arrives through Chromium's component
+      // updater, so this can take a moment on first run and needs network.
+      // Creating a window before it resolves means EME is simply absent.
+      await components.whenReady()
+      log('widevine ready:', JSON.stringify(components.status()))
+      send({ event: 'widevine-ready' })
+    } catch (err) {
+      fail('widevine-unavailable', err)
+      // No CDM means no playback, ever. Say so and exit rather than pretend.
+      app.exit(1)
+      return
+    }
   }
 
   // The renderer talks back through the same channel name in both directions.
   const { ipcMain } = require('electron')
 
   ipcMain.on('slipmat:event', (_e, ev) => {
-    if (ev && ev.event === 'playbackState') syncSuspension(ev.state)
+    if (!METADATA_ONLY && ev && ev.event === 'playbackState') syncSuspension(ev.state)
     if (ev && ev.event === 'hook-failed') syncSuspension('none')
     if (ev && ev.event === 'queue-identity-probe') {
       log('queue identity probe:', JSON.stringify(ev))

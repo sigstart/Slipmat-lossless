@@ -8,9 +8,10 @@
 //! process may. What is left is a socket that can go away — which is a smaller
 //! problem, since reconnecting costs a connect rather than a Widevine boot.
 
-use relm4::ComponentSender;
+use relm4::{ComponentController, ComponentSender, adw};
 
-use super::{AppModel, CommandMsg, Stage};
+use super::{AppModel, CommandMsg, PlaybackCapabilities, Stage};
+use crate::components::queue_view::QueueViewInput;
 use crate::daemon;
 use slipmat_core::ipc::{Event, Request, Stage as DaemonStage, Transport};
 
@@ -72,10 +73,23 @@ impl AppModel {
 
     /// The transport verbs, which are most of what this app asks for.
     pub(super) fn transport(&self, verb: Transport) {
-        self.ask(Request::Transport(verb));
+        let supported = match &verb {
+            Transport::Seek { .. } => self.playback_capabilities.seek,
+            Transport::SetShuffle { .. } => self.playback_capabilities.shuffle,
+            Transport::SetRepeat { .. } => self.playback_capabilities.repeat,
+            _ => true,
+        };
+        if supported {
+            self.ask(Request::Transport(verb));
+        }
     }
 
-    pub(super) fn on_daemon(&mut self, message: daemon::Incoming, sender: &ComponentSender<Self>) {
+    pub(super) fn on_daemon(
+        &mut self,
+        message: daemon::Incoming,
+        sender: &ComponentSender<Self>,
+        root: &adw::ApplicationWindow,
+    ) {
         match message {
             daemon::Incoming::Connected(handle) => {
                 tracing::info!("connected to slipmatd");
@@ -90,7 +104,7 @@ impl AppModel {
                 self.ask(Request::Snapshot);
                 self.ask(Request::Queue);
             }
-            daemon::Incoming::Event(event) => self.on_event(*event, sender),
+            daemon::Incoming::Event(event) => self.on_event(*event, sender, root),
             daemon::Incoming::Unparsed(line) => {
                 // Loudly, per rule 4: this is `ipc.rs` and this build
                 // disagreeing, which a restart will not fix and silence hides.
@@ -107,8 +121,39 @@ impl AppModel {
         }
     }
 
-    fn on_event(&mut self, event: Event, sender: &ComponentSender<Self>) {
+    fn on_event(
+        &mut self,
+        event: Event,
+        sender: &ComponentSender<Self>,
+        root: &adw::ApplicationWindow,
+    ) {
         match event {
+            Event::NativeSignIn { required } => {
+                self.native_auth_needed_for_play = required;
+                if required {
+                    self.native_auth_action.set_enabled(true);
+                    self.open_native_auth(sender, root);
+                }
+            }
+            Event::PlaybackCapabilities {
+                native,
+                seek,
+                shuffle,
+                repeat,
+            } => {
+                self.native_playback = native;
+                self.playback_capabilities = PlaybackCapabilities {
+                    seek,
+                    shuffle,
+                    repeat,
+                };
+                self.queue_view
+                    .emit(QueueViewInput::SetCapabilities(self.playback_capabilities));
+                for page in &self.pages {
+                    page.set_shuffle_supported(shuffle);
+                }
+                self.push_snapshot();
+            }
             Event::Snapshot(snap) => {
                 self.mirror.snap = snap;
                 self.sync_tick(sender);

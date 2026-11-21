@@ -1,0 +1,11 @@
+[package]
+name = "slipmat-playback"
+description = "Streaming clear ALAC decoding and PulseAudio playback"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+libpulse-binding = { version = "2", default-features = false }
+symphonia = { version = "=0.6.1", default-features = false, features = ["alac", "isomp4"] }
