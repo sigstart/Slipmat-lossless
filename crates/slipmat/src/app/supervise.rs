@@ -155,12 +155,14 @@ impl AppModel {
                 // is what announced the previous song. `notified_for` is what
                 // keeps a twice-a-second snapshot from notifying twice.
                 self.maybe_notify(in_flight);
+                // Same reason: the id is the snapshot's, so marking on the
+                // queue event put the marker one track behind.
+                self.mark_now_playing();
             }
             Event::Queue { items, position } => {
                 self.mirror.queue = items;
                 self.mirror.queue_position = position;
                 self.push_snapshot();
-                self.mark_now_playing();
             }
             Event::Stage(stage) => {
                 let clear = clears_account_state(&stage);
