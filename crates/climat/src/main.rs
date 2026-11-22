@@ -1010,6 +1010,7 @@ impl App {
                 }
                 self.message = Some(Notice::bad(detail));
             }
+            Event::PlaybackFailed { detail } => self.message = Some(Notice::bad(detail)),
         }
     }
 }

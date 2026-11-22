@@ -504,6 +504,12 @@ pub enum Event {
     /// Something went wrong that a person should see.
     #[serde(rename = "error")]
     Error { detail: String },
+
+    /// The player stopped because a track could not be played. Apart from
+    /// [`Event::Error`] because it can happen with nobody looking, where a
+    /// browsing error cannot, so a client may say it louder.
+    #[serde(rename = "playbackFailed")]
+    PlaybackFailed { detail: String },
 }
 
 /// One row of the queue.

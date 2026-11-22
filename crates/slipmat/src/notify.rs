@@ -27,6 +27,20 @@ const BANNER: std::time::Duration = std::time::Duration::from_secs(6);
 /// by the *previous* track knows not to withdraw the one that replaced it.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
+const PLAYBACK_FAILED: &str = "playback-failed";
+
+/// Say why the music stopped.
+///
+/// Normal priority and **not withdrawn**: silence is the symptom, and whoever
+/// comes back to find it needs the reason still there. One id, so a second
+/// failure replaces the first rather than stacking.
+pub fn playback_failed(app: &gio::Application, detail: &str) {
+    let notification = gio::Notification::new("Playback stopped");
+    notification.set_body(Some(detail));
+    notification.set_icon(&gio::ThemedIcon::new(crate::APP_ID));
+    app.send_notification(Some(PLAYBACK_FAILED), &notification);
+}
+
 /// Notify that a new track started.
 ///
 /// Deliberately quiet about failure: a notification that does not appear is
@@ -55,6 +69,8 @@ pub fn track_changed(app: &gio::Application, title: &str, artist: &str, art: Opt
     // than stacking a new one per song — a queue of 500 would otherwise bury
     // the notification tray.
     app.send_notification(Some("now-playing"), &notification);
+    // Playing again, so the reason it stopped is no longer news.
+    app.withdraw_notification(PLAYBACK_FAILED);
 
     // Then take it back.
     //

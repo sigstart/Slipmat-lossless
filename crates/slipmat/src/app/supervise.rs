@@ -209,6 +209,10 @@ impl AppModel {
                 // presentation rather than something to ask across a socket.
             }
             Event::Error { detail } => self.toast(&detail),
+            Event::PlaybackFailed { detail } => {
+                self.toast(&detail);
+                self.notify_playback_failed(&detail);
+            }
         }
     }
 

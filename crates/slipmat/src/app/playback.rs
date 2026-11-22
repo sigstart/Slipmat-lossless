@@ -72,11 +72,7 @@ impl AppModel {
             return;
         };
 
-        if relm4::main_application()
-            .windows()
-            .iter()
-            .any(gtk::prelude::GtkWindowExt::is_active)
-        {
+        if window_has_focus() {
             tracing::debug!("not notifying: the window has focus");
             return;
         }
@@ -85,6 +81,17 @@ impl AppModel {
             &item.title,
             &item.artist,
             self.art_path.as_deref(),
+        );
+    }
+
+    /// The toast already says it when the window is in front.
+    pub(super) fn notify_playback_failed(&self, detail: &str) {
+        if window_has_focus() {
+            return;
+        }
+        notify::playback_failed(
+            relm4::main_application().upcast_ref::<gtk::gio::Application>(),
+            detail,
         );
     }
 
@@ -272,6 +279,14 @@ impl AppModel {
             }
         }
     }
+}
+
+/// Checked at the moment of sending: focus can change while a cover is fetched.
+fn window_has_focus() -> bool {
+    relm4::main_application()
+        .windows()
+        .iter()
+        .any(gtk::prelude::GtkWindowExt::is_active)
 }
 
 /// How far into a track "Previous" restarts it rather than going back one.

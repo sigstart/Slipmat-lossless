@@ -368,7 +368,7 @@ impl QueuePlayer {
         self.playing = false;
         daemon.require_sign_in(false);
         Self::state(daemon, PlaybackState::Paused);
-        daemon.publish(Event::Error {
+        daemon.publish(Event::PlaybackFailed {
             detail: detail.into(),
         });
     }
