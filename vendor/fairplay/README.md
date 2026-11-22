@@ -1,38 +1,59 @@
-# x86-64 FairPlay libraries for local evaluation
+# Local FairPlay setup on Linux x86-64
 
-The Linux x86-64 library inventory comes from Adam's `drm/fairplay-libs.lock`
-at commit `3c03a4d20ee8c2ed523cd86d35d9807dea2de5fa`. The checksums verify
-that the files match the reference inventory. Publisher provenance and
-redistribution permission are open questions.
+`make install` checks and downloads the Apple Android FairPlay libraries into
+the Git-ignored `x86_64/rootfs/system/lib64/` directory. To fetch or repair
+just those files, run `make fairplay-libs` from the Slipmat checkout.
 
-From the Slipmat repository, stage the files from an existing Adam installation.
-The destination is ignored by Git and is for local evaluation.
+[The lockfile](x86_64/fairplay-libs.lock) records both GitHub mirrors at exact
+commits and the expected SHA-256 digest of each library. The downloader reuses
+matching local files and tries the backup mirror if the primary fails or
+returns a file with the wrong digest. It only moves verified downloads into
+place. These files stay local and are excluded from distribution packages.
+The digests verify agreement with the pinned inventory. Apple publisher
+provenance and redistribution permission remain open questions.
+
+## Playback development
+
+`sh scripts/fairplay/prepare.sh` stages the same libraries as
+`make fairplay-libs`. Pass `--check` to verify the local files without
+downloading anything.
+
+`make fairplay-provider` builds the provider, `crates/fairplay-provider`, with
+`libdrm_client.so` from `vendor/adam/drm`. It needs Cargo, GNU make, a C/C++
+toolchain, `xxd`, and development packages for OpenSSL, libcurl, and libpulse.
+The launcher uses bubblewrap and a
+local PulseAudio-compatible Unix socket. The daemon keeps the session profile
+on private tmpfs under `$XDG_RUNTIME_DIR`, and saves it encrypted with a key in
+Secret Service, reached through `secret-tool`. Without either, sign-in still
+works but is not remembered.
+
+The Adam copies of libhybris and its linker are Git LFS pointers. Supply
+the matching binaries as `x86_64/compat/libhybris-core.so` and
+`x86_64/compat/q.so`. The build checks those and the three staged Android
+stubs against `x86_64/COMPAT-SHA256SUMS`.
 
 ```sh
-set -eu
-stage="$PWD/vendor/fairplay/x86_64"
-source="$HOME/.config/adam/drm/rootfs/system/lib64"
-(cd "$source" && sha256sum --check "$stage/SHA256SUMS")
-mkdir -p "$stage/rootfs/system/lib64"
-while read -r digest library; do
-    cp -- "$source/$library" "$stage/rootfs/system/lib64/$library"
-done < "$stage/SHA256SUMS"
-(cd "$stage/rootfs/system/lib64" && sha256sum --check "$stage/SHA256SUMS")
+make fairplay-libs
+provider=$(sh scripts/fairplay/build-provider.sh)
+state="${XDG_STATE_HOME:-$HOME/.local/state}/slipmat"
+mkdir -p "$state"
+printf '%s\n' "$provider" > "$state/fairplay-provider"
+cargo build --locked --workspace
+target/debug/slipmat
 ```
 
-## Compatibility files and load probe
+GTK and CLImat start the daemon with the saved launcher path. Restart any
+running daemon after changing the setting. Update `fairplay-provider` after
+moving the checkout or deleting the build directory. For a one-off override,
+use `slipmatd --fairplay-provider /absolute/path/to/launch`.
 
-`COMPAT-SHA256SUMS` identifies the libhybris core and Android linker from the
-same reference revision. The source paths are `drm/libhybris-core.so` and
-`drm/hybris-linker/q.so`. Use the Git LFS contents and put both files in
-`vendor/fairplay/x86_64/compat/`. Build the three Android stubs from
-`drm/stubs/empty_stub.c` and `drm/stubs/libdl.map` with the reference
-Makefile's `android-stubs` target in a disposable build copy. Stage them in
-`rootfs/system/lib64/` alongside the x86-64 FairPlay libraries. The verified
-stub build matches the copies in the local installation.
+Sign in from GTK or run `target/debug/climat sign-in`. This build supports
+the six-digit verification prompt. Other Apple verification dialogs end the
+attempt with an explicit error. Live sign-in and session restore passed.
+Licensed ALAC output and licence denial still need live verification.
 
-Run `sh scripts/fairplay-load-probe.sh` from Slipmat. It verifies the two
-manifests and opens the three main libraries through libhybris in a short-lived
-process with an empty home directory. The probe verifies startup only. See the
-[FairPlay evaluation spec](../../docs/specs/SPEC-fairplay-phase-1.md) for
-playback and account requirements.
+The load probe builds its three Android stub libraries in a temporary
+directory with the host C compiler. It requires separately staged libhybris
+and its Android linker, verified against the loader entries in the
+[compatibility manifest](x86_64/COMPAT-SHA256SUMS). Run
+`sh scripts/fairplay-load-probe.sh` to check library loading on x86-64.

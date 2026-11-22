@@ -1,0 +1,17 @@
+[package]
+name = "fairplay-provider"
+description = "The sandboxed FairPlay provider: Apple's Android libraries behind a stdio protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+fairplay-wire = { path = "../fairplay-wire" }
+libc = "0.2"
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+slipmat-playback = { path = "../slipmat-playback" }
+tokio.workspace = true
+zeroize = "1"

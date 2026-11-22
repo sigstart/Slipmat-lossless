@@ -33,7 +33,7 @@ impl Model {
             stage: Stage::Connecting,
             volume: 1.0,
             tokens: None,
-            library: Library::from_cache(),
+            library: Library::default(),
             dead_ids: slipmat_core::unplayable::load(),
             art_path: None,
         }

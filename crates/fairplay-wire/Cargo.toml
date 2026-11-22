@@ -1,0 +1,16 @@
+[package]
+name = "fairplay-wire"
+description = "The JSON-lines protocol between slipmatd and the FairPlay provider"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Kept free of slipmat-core so the sandboxed provider carries no D-Bus stack.
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+zeroize = "1"
+
+[dev-dependencies]
+tokio.workspace = true

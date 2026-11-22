@@ -25,6 +25,24 @@ use crate::paths::artwork_dir;
 /// cache simple; a Shell scales it down and nobody notices.
 pub const ART_SIZE: u32 = 512;
 
+// Leave room for short motion-art video assets as well as static images.
+const MAX_ARTWORK_BYTES: usize = 64 * 1024 * 1024;
+static DOWNLOADS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+static HTTP: tokio::sync::OnceCell<reqwest::Client> = tokio::sync::OnceCell::const_new();
+
+fn allowed_artwork_url(url: &reqwest::Url) -> bool {
+    url.scheme() == "https"
+        && url.port_or_known_default() == Some(443)
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.host_str().is_some_and(|host| {
+            host == "mzstatic.com"
+                    || host.ends_with(".mzstatic.com")
+                    // Covers of tracks uploaded to iCloud Music Library.
+                    || host.ends_with(".blobstore.apple.com")
+        })
+}
+
 /// Where a cover of this size lands on disk.
 pub fn cache_path(art: &Artwork, size: u32) -> Option<PathBuf> {
     Some(artwork_dir()?.join(format!("{}-{size}.jpg", art.cache_key())))
@@ -37,15 +55,41 @@ pub async fn fetch(art: Artwork, size: u32) -> Result<PathBuf> {
         return Ok(path);
     }
 
-    let url = art.url(size);
-    let bytes = reqwest::get(&url)
-        .await
-        .with_context(|| format!("requesting artwork {url}"))?
-        .error_for_status()
-        .context("artwork request failed")?
-        .bytes()
-        .await
-        .context("reading artwork body")?;
+    let url = reqwest::Url::parse(&art.url(size)).context("invalid artwork URL")?;
+    anyhow::ensure!(allowed_artwork_url(&url), "untrusted artwork URL");
+    let _permit = DOWNLOADS.acquire().await?;
+    if path.is_file() {
+        return Ok(path);
+    }
+    let client = HTTP
+        .get_or_try_init(|| async {
+            reqwest::Client::builder()
+                .https_only(true)
+                .timeout(std::time::Duration::from_secs(60))
+                .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                    if attempt.previous().len() >= 5 || !allowed_artwork_url(attempt.url()) {
+                        return attempt.error("untrusted artwork redirect or too many redirects");
+                    }
+                    attempt.follow()
+                }))
+                .build()
+        })
+        .await?;
+    let mut response = client.get(url).send().await?.error_for_status()?;
+    anyhow::ensure!(
+        response
+            .content_length()
+            .is_none_or(|length| length <= MAX_ARTWORK_BYTES as u64),
+        "artwork exceeds download limit"
+    );
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        anyhow::ensure!(
+            chunk.len() <= MAX_ARTWORK_BYTES - bytes.len(),
+            "artwork exceeds download limit"
+        );
+        bytes.extend_from_slice(&chunk);
+    }
 
     write_atomically(&path, &bytes)?;
     Ok(path)
@@ -65,6 +109,27 @@ pub fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn artwork_urls_are_confined_to_the_apple_cdn() {
+        for (url, allowed) in [
+            ("https://is1.mzstatic.com/cover.jpg", true),
+            (
+                "https://store-033.blobstore.apple.com/sq-mq-us-033/image?X-Amz-Signature=a",
+                true,
+            ),
+            ("https://blobstore.apple.com.example.org/image", false),
+            ("https://mvod.itunes.apple.com/preview.mp4", false),
+            ("https://mzstatic.com.example.org/cover.jpg", false),
+            ("http://is1.mzstatic.com/cover.jpg", false),
+            ("https://is1.mzstatic.com:8443/cover.jpg", false),
+        ] {
+            assert_eq!(
+                allowed_artwork_url(&reqwest::Url::parse(url).unwrap()),
+                allowed
+            );
+        }
+    }
 
     #[test]
     fn a_failed_atomic_write_keeps_the_destination() {

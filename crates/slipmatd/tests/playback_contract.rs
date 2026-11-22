@@ -23,15 +23,15 @@ const MPRIS_NAME: &str = "org.mpris.MediaPlayer2.Slipmat";
 const MPRIS_PLAYER: &str = "org.mpris.MediaPlayer2.Player";
 
 #[tokio::test]
-async fn normal_play_uses_the_configured_native_queue() {
+async fn normal_play_uses_the_configured_queue() {
     let home = TestHome::new();
     let launcher = home.0.join("provider");
-    fs::write(&launcher, include_bytes!("fixtures/native-queue-provider")).unwrap();
+    fs::write(&launcher, include_bytes!("fixtures/queue-provider")).unwrap();
     fs::set_permissions(&launcher, Permissions::from_mode(0o700)).unwrap();
     let state = home.0.join("state/slipmat");
     fs::create_dir_all(&state).unwrap();
     fs::write(
-        state.join("native-provider"),
+        state.join("fairplay-provider"),
         format!("{}\n", launcher.display()),
     )
     .unwrap();
@@ -68,7 +68,6 @@ async fn normal_play_uses_the_configured_native_queue() {
     assert!(matches!(
         feed.event().await,
         Event::PlaybackCapabilities {
-            native: true,
             seek: false,
             shuffle: false,
             repeat: false
@@ -77,7 +76,7 @@ async fn normal_play_uses_the_configured_native_queue() {
 
     assert!(matches!(
         feed.event().await,
-        Event::NativeSignIn { required: false }
+        Event::SignInRequired { required: false }
     ));
     commands.request(Request::Stage).await;
     assert_eq!(commands.stage_event().await, Stage::SignedOut);
@@ -90,7 +89,7 @@ async fn normal_play_uses_the_configured_native_queue() {
         })
         .await;
     feed.expect_queue(1, &["111", "111", "333"]).await;
-    feed.until(|event| matches!(event, Event::NativeSignIn { required: true }))
+    feed.until(|event| matches!(event, Event::SignInRequired { required: true }))
         .await;
 
     let mut auth = Wire::new(
@@ -106,7 +105,7 @@ async fn normal_play_uses_the_configured_native_queue() {
     )
     .await;
     auth.expect_command(json!({"type":"signedIn"})).await;
-    feed.expect_native_position("111", 1250, true).await;
+    feed.expect_position("111", 1250, true).await;
 
     let mpris = bus.is_some() && home.wait_for_mpris(&bus_address).await;
     if mpris {
@@ -116,9 +115,9 @@ async fn normal_play_uses_the_configured_native_queue() {
     } else {
         commands.request(Request::Transport(Transport::Pause)).await;
     }
-    feed.expect_native_position("111", 1250, false).await;
+    feed.expect_position("111", 1250, false).await;
     commands.request(Request::Transport(Transport::Play)).await;
-    feed.expect_native_position("111", 1250, true).await;
+    feed.expect_position("111", 1250, true).await;
     commands
         .request(Request::Enqueue {
             ids: vec!["222".into()],
@@ -134,16 +133,81 @@ async fn normal_play_uses_the_configured_native_queue() {
     commands.request(Request::Transport(Transport::Next)).await;
     feed.expect_queue(1, &["111", "222", "333", "111"]).await;
     feed.expect_queue(2, &["111", "222", "333", "111"]).await;
-    feed.expect_native_position("333", 2300, true).await;
+    feed.expect_position("333", 2300, true).await;
     commands.request(Request::JumpTo { index: 3 }).await;
     feed.expect_queue(3, &["111", "222", "333", "111"]).await;
-    feed.expect_native_position("111", 1250, true).await;
+    feed.expect_position("111", 1250, true).await;
     commands.request(Request::ClearQueue).await;
     feed.expect_queue(0, &[]).await;
     feed.until(
         |event| matches!(event, Event::Snapshot(snap) if !snap.playing && snap.track_id.is_none()),
     )
     .await;
+
+    commands
+        .request(Request::Play {
+            ids: ["444", "444"].map(str::to_owned).to_vec(),
+            index: 0,
+            start: Default::default(),
+        })
+        .await;
+    feed.expect_queue(0, &["444", "444"]).await;
+    feed.expect_position("444", 3600, true).await;
+    let duplicate_tracks = if mpris {
+        let tracks = home.mpris_tracks(&bus_address).await;
+        assert_eq!(tracks.len(), 2);
+        assert_ne!(tracks[0], tracks[1]);
+        assert_eq!(home.mpris_track_id(&bus_address).await, tracks[0]);
+        Some(tracks)
+    } else {
+        None
+    };
+    commands.request(Request::Transport(Transport::Pause)).await;
+    feed.expect_position("444", 3600, false).await;
+    commands.request(Request::Transport(Transport::Play)).await;
+    // The provider completes the first occurrence after resume.
+    feed.expect_queue(1, &["444", "444"]).await;
+    feed.expect_position("444", 400, true).await;
+    if let Some(tracks) = duplicate_tracks {
+        assert_eq!(home.mpris_tracks(&bus_address).await, tracks);
+        assert_eq!(home.mpris_track_id(&bus_address).await, tracks[1]);
+    }
+
+    commands
+        .request(Request::Play {
+            ids: vec!["111".into()],
+            index: 0,
+            start: Default::default(),
+        })
+        .await;
+    feed.expect_position("111", 1250, true).await;
+    assert!(state.join("session.json").is_file());
+    auth.send(json!({"type":"signOut"})).await;
+    auth.expect_command(json!({"type":"signedOut"})).await;
+    commands.request(Request::Queue).await;
+    commands.expect_queue(0, &[]).await;
+    commands.request(Request::Snapshot).await;
+    assert!(matches!(
+        commands.event().await,
+        Event::Snapshot(snapshot) if snapshot.track_id.is_none() && !snapshot.playing
+    ));
+    assert!(!state.join("session.json").exists());
+
+    let mut idle_main = Wire::new(UnixStream::connect(&socket).await.unwrap());
+    let mut idle_auth = Wire::new(
+        UnixStream::connect(runtime.join("slipmat-auth.sock"))
+            .await
+            .unwrap(),
+    );
+    timeout(Duration::from_secs(8), async {
+        let (main, auth) = tokio::join!(idle_main.read.next_line(), idle_auth.read.next_line());
+        assert!(main.unwrap().is_none());
+        assert!(auth.unwrap().is_none());
+    })
+    .await
+    .unwrap();
+    commands.request(Request::Stage).await;
+    assert_eq!(commands.stage_event().await, Stage::SignedOut);
 
     commands.write.shutdown().await.unwrap();
     assert!(
@@ -163,12 +227,191 @@ async fn normal_play_uses_the_configured_native_queue() {
     );
 }
 
+#[tokio::test]
+async fn stale_provider_configuration_keeps_the_daemon_available() {
+    let home = TestHome::new();
+    let runtime = home.0.join("run");
+    fs::set_permissions(&runtime, Permissions::from_mode(0o700)).unwrap();
+    let state = home.0.join("state/slipmat");
+    fs::create_dir_all(&state).unwrap();
+    fs::write(
+        state.join("fairplay-provider"),
+        format!("{}\n", home.0.join("missing-launcher").display()),
+    )
+    .unwrap();
+
+    let mut daemon = home
+        .command(env!("CARGO_BIN_EXE_slipmatd"))
+        .env("DBUS_SESSION_BUS_ADDRESS", home.address("no-bus"))
+        .spawn()
+        .unwrap();
+    let mut commands = Wire::connect(&runtime.join("slipmat.sock")).await;
+    commands.request(Request::Stage).await;
+    assert!(
+        matches!(commands.stage_event().await, Stage::Broken { detail } if detail.contains("launcher path"))
+    );
+    assert!(!runtime.join("slipmat-auth.sock").exists());
+    commands.request(Request::Quit).await;
+    assert!(
+        timeout(WAIT, daemon.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+}
+
+const PROFILE_PROVIDER: &str = r#"#!/bin/sh
+set -eu
+IFS= read -r begin
+[ "$begin" = '{"type":"begin"}' ]
+files="$1/files"
+if [ "$2" = sign-in ]; then
+    /bin/mkdir -p "$files/mpl_db"
+    printf 'ready' > "$files/session-ready"
+    printf 'fixture-accounts' > "$files/mpl_db/accounts.sqlitedb"
+else
+    [ "$2" = restore ]
+    [ "$(/bin/cat "$files/session-ready")" = ready ]
+    [ "$(/bin/cat "$files/mpl_db/accounts.sqlitedb")" = fixture-accounts ]
+fi
+printf '%s\n' '{"type":"signedIn","catalogue":{"developerToken":"fixture-dev","musicUserToken":"fixture-user","storefront":"us","authorized":true}}'
+while IFS= read -r request; do :; done
+"#;
+
+// Stands in for Secret Service. The slow store is what a quit must wait out.
+const FAKE_SECRET_TOOL: &str = r#"#!/bin/sh
+set -eu
+keyring="$FAKE_KEYRING"
+case "$1" in
+    lookup)
+        [ "$2 $3 $4" = 'application dev.miguelrincon.Slipmat profile' ]
+        [ -f "$keyring" ] && [ "$(/bin/cat "$keyring.profile")" = "$5" ] || exit 1
+        /bin/cat "$keyring"
+        ;;
+    store)
+        [ "$2" = '--label=Slipmat FairPlay session key' ]
+        [ "$3 $4 $5" = 'application dev.miguelrincon.Slipmat profile' ]
+        /bin/sleep 0.4
+        /bin/cat > "$keyring"
+        printf '%s' "$6" > "$keyring.profile"
+        ;;
+    *) exit 1 ;;
+esac
+"#;
+
+#[tokio::test]
+async fn a_saved_session_survives_quit_and_restores_until_sign_out() {
+    let home = TestHome::new();
+    assert!(
+        home.on_tmpfs(),
+        "{} must be tmpfs for the provider profile",
+        home.0.display()
+    );
+    let runtime = home.0.join("run");
+    fs::set_permissions(&runtime, Permissions::from_mode(0o700)).unwrap();
+    let launcher = home.0.join("provider");
+    fs::write(&launcher, PROFILE_PROVIDER).unwrap();
+    fs::set_permissions(&launcher, Permissions::from_mode(0o700)).unwrap();
+    let bin = home.0.join("bin");
+    fs::create_dir(&bin).unwrap();
+    fs::write(bin.join("secret-tool"), FAKE_SECRET_TOOL).unwrap();
+    fs::set_permissions(bin.join("secret-tool"), Permissions::from_mode(0o700)).unwrap();
+    let state = home.0.join("state/slipmat");
+    let archive = state.join("fairplay-session.enc");
+    let keyring = home.0.join("keyring");
+
+    let spawn = || {
+        home.command(env!("CARGO_BIN_EXE_slipmatd"))
+            .arg("--fairplay-provider")
+            .arg(&launcher)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("FAKE_KEYRING", &keyring)
+            .env("DBUS_SESSION_BUS_ADDRESS", home.address("no-bus"))
+            .env(
+                "PULSE_SERVER",
+                format!("unix:{}", home.0.join("no-pulse").display()),
+            )
+            .spawn()
+            .unwrap()
+    };
+    let mut daemon = spawn();
+    let mut commands = Wire::connect(&runtime.join("slipmat.sock")).await;
+    let mut auth = Wire::connect(&runtime.join("slipmat-auth.sock")).await;
+    auth.send(json!({"type":"begin"})).await;
+    auth.expect_command(json!({"type":"signedIn"})).await;
+    commands.request(Request::Quit).await;
+    assert!(
+        timeout(WAIT, daemon.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    let sealed = fs::read(&archive).unwrap();
+    assert!(
+        !sealed
+            .windows(b"fixture-accounts".len())
+            .any(|window| window == b"fixture-accounts"),
+        "the archive holds the profile in the clear"
+    );
+    assert_eq!(
+        fs::read_to_string(keyring.with_extension("profile")).unwrap(),
+        archive.display().to_string()
+    );
+    assert!(
+        !runtime.join("slipmat-fairplay-profile").exists(),
+        "the decrypted profile outlived the daemon"
+    );
+
+    let mut daemon = spawn();
+    let mut auth = Wire::connect(&runtime.join("slipmat-auth.sock")).await;
+    timeout(WAIT, async {
+        loop {
+            auth.send(json!({"type":"status"})).await;
+            let reply: Value = serde_json::from_str(&auth.read_line().await).unwrap();
+            if reply == json!({"type":"signedIn"}) {
+                break;
+            }
+            assert_eq!(reply, json!({"type":"busy"}));
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    auth.send(json!({"type":"signOut"})).await;
+    auth.expect_command(json!({"type":"signedOut"})).await;
+    assert!(!archive.exists());
+    let mut commands = Wire::connect(&runtime.join("slipmat.sock")).await;
+    commands.request(Request::Quit).await;
+    assert!(
+        timeout(WAIT, daemon.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+}
+
 struct Wire {
     read: Lines<BufReader<OwnedReadHalf>>,
     write: OwnedWriteHalf,
 }
 
 impl Wire {
+    async fn connect(path: &Path) -> Self {
+        timeout(WAIT, async {
+            loop {
+                if let Ok(stream) = UnixStream::connect(path).await {
+                    return Self::new(stream);
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+
     fn new(stream: UnixStream) -> Self {
         let (read, write) = stream.into_split();
         Self {
@@ -225,7 +468,7 @@ impl Wire {
         .expect("timed out waiting for the expected event");
     }
 
-    async fn expect_native_position(&mut self, id: &str, ms: u64, playing: bool) {
+    async fn expect_position(&mut self, id: &str, ms: u64, playing: bool) {
         self.until(|event| {
             matches!(event, Event::Snapshot(snap)
             if snap.track_id.as_deref() == Some(id) && snap.position_ms == ms
@@ -280,13 +523,27 @@ impl TestHome {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        // Keep the private sockets within the Unix path length limit.
-        let root = Self(Path::new("/tmp").join(format!("slipmat-{}-{unique}", std::process::id())));
+        // Keep the private sockets within the Unix path length limit. The
+        // provider profile needs tmpfs, which /dev/shm is wherever it exists.
+        let base = ["/dev/shm", "/tmp"]
+            .into_iter()
+            .map(Path::new)
+            .find(|base| base.is_dir())
+            .unwrap();
+        let root = Self(base.join(format!("slipmat-{}-{unique}", std::process::id())));
         DirBuilder::new().mode(0o700).create(&root.0).unwrap();
         for dir in ["run", "home", "cache", "config", "data", "state"] {
             fs::create_dir(root.0.join(dir)).unwrap();
         }
         root
+    }
+
+    fn on_tmpfs(&self) -> bool {
+        std::process::Command::new("stat")
+            .args(["-f", "-c", "%T"])
+            .arg(&self.0)
+            .output()
+            .is_ok_and(|output| output.stdout == b"tmpfs\n")
     }
 
     fn command(&self, executable: &str) -> Command {
@@ -415,6 +672,31 @@ impl TestHome {
             matched.is_ok(),
             "timed out waiting for MPRIS PlaybackStatus {status}, last response {observed:?}"
         );
+    }
+
+    async fn mpris_tracks(&self, address: &str) -> Vec<String> {
+        self.mpris_call(
+            address,
+            "org.freedesktop.DBus.Properties.Get",
+            &["org.mpris.MediaPlayer2.TrackList", "Tracks"],
+        )
+        .await
+        .split('\'')
+        .filter(|part| part.starts_with('/'))
+        .map(str::to_owned)
+        .collect()
+    }
+
+    async fn mpris_track_id(&self, address: &str) -> String {
+        let metadata = self
+            .mpris_call(
+                address,
+                "org.freedesktop.DBus.Properties.Get",
+                &[MPRIS_PLAYER, "Metadata"],
+            )
+            .await;
+        let (_, track_id) = metadata.split_once("'mpris:trackid':").unwrap();
+        track_id.split('\'').nth(1).unwrap().to_owned()
     }
 }
 

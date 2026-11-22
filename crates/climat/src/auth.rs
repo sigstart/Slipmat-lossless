@@ -8,7 +8,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 
 use anyhow::{Result, anyhow, bail};
-use slipmat_core::native_auth::{Client, Reply, TrialStage};
+use slipmat_core::auth::{Client, Reply};
 use tokio::io::{Interest, unix::AsyncFd};
 use tokio::signal::unix::{SignalKind, signal};
 
@@ -16,7 +16,6 @@ pub enum Command {
     SignIn,
     SignOut,
     Status,
-    PlayTrack { track_id: String },
 }
 
 impl Command {
@@ -25,32 +24,19 @@ impl Command {
             Some("sign-in") => Self::SignIn,
             Some("sign-out") => Self::SignOut,
             Some("sign-in-status") => Self::Status,
-            Some("native-play") => {
-                let track_id = args
-                    .next()
-                    .and_then(|arg| arg.into_string().ok())
-                    .filter(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
-                    .filter(|_| args.next().is_none())
-                    .ok_or_else(|| {
-                        anyhow!("Usage: climat native-play <catalog-song-id> (one decimal ID).")
-                    })?;
-                return Ok(Some(Self::PlayTrack { track_id }));
-            }
             _ => return Ok(None),
         };
         if args.next().is_some() {
-            bail!("Native authentication commands take no arguments.");
+            bail!("Authentication commands take no arguments.");
         }
         Ok(Some(command))
     }
 }
 
 pub async fn run(command: Command) -> Result<()> {
-    let signing_in = match command {
-        Command::SignIn => true,
-        Command::PlayTrack { .. } => false,
-        Command::SignOut | Command::Status => return exchange(command).await,
-    };
+    if !matches!(command, Command::SignIn) {
+        return exchange(command).await;
+    }
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut terminate = signal(SignalKind::terminate())?;
     let mut hangup = signal(SignalKind::hangup())?;
@@ -61,11 +47,8 @@ pub async fn run(command: Command) -> Result<()> {
         _ = hangup.recv() => {},
         result = exchange(command) => return result,
     }
-    if signing_in {
-        eprintln!();
-        bail!("Native sign-in cancelled.");
-    }
-    bail!("Native playback cancelled.");
+    eprintln!();
+    bail!("Sign-in cancelled.");
 }
 
 async fn exchange(command: Command) -> Result<()> {
@@ -76,31 +59,30 @@ async fn exchange(command: Command) -> Result<()> {
     }
     let mut client = connection.map_err(|error| {
         if endpoint_missing(&error) {
-            anyhow!("Native authentication is unavailable. The local auth endpoint is not running.")
+            anyhow!("Authentication is unavailable. The local auth endpoint is not running.")
         } else {
-            anyhow!("Could not connect to the native authentication endpoint.")
+            anyhow!("Could not connect to the authentication endpoint.")
         }
     })?;
     let reply = match command {
         Command::SignIn => sign_in(&mut client).await?,
         Command::SignOut => auth_reply(client.sign_out().await)?,
         Command::Status => auth_reply(client.status().await)?,
-        Command::PlayTrack { track_id } => return play_track(&mut client, track_id).await,
     };
 
     let message = match (command, reply) {
-        (Command::SignIn, Reply::SignedIn) => "Signed in to a native Apple Music session.",
-        (Command::Status, Reply::SignedIn) => "A native Apple Music session is active.",
-        (Command::Status, Reply::SignedOut) => "No native Apple Music session is active.",
-        (Command::SignOut, Reply::SignedOut) => "The native Apple Music session has ended.",
-        (Command::SignIn, Reply::SignedOut) => bail!("Native sign-in ended while signed out."),
-        (_, Reply::Busy) => bail!("Native authentication is busy. Try again shortly."),
-        (_, Reply::Rejected) => bail!("The native authentication request was rejected."),
+        (Command::SignIn, Reply::SignedIn) => "Signed in to an Apple Music session.",
+        (Command::Status, Reply::SignedIn) => "An Apple Music session is active.",
+        (Command::Status, Reply::SignedOut) => "No Apple Music session is active.",
+        (Command::SignOut, Reply::SignedOut) => "The Apple Music session has ended.",
+        (Command::SignIn, Reply::SignedOut) => bail!("Sign-in ended while signed out."),
+        (_, Reply::Busy) => bail!("Authentication is busy. Try again shortly."),
+        (_, Reply::Rejected) => bail!("The authentication request was rejected."),
         (_, Reply::VerificationUnsupported) => {
             bail!("Apple requested an unsupported verification method.")
         }
-        (_, Reply::Expired) => bail!("The native authentication request expired. Try again."),
-        (_, Reply::Failed) => bail!("The native authentication request failed."),
+        (_, Reply::Expired) => bail!("The authentication request expired. Try again."),
+        (_, Reply::Failed) => bail!("The authentication request failed."),
         (
             _,
             Reply::Playing
@@ -109,66 +91,15 @@ async fn exchange(command: Command) -> Result<()> {
             | Reply::Stopped
             | Reply::Played { .. }
             | Reply::LicenceDenied
-            | Reply::TrialFailed { .. },
+            | Reply::PlaybackFailed { .. },
         ) => {
-            bail!("Unexpected playback reply from the native authentication endpoint.");
+            bail!("Unexpected playback reply from the authentication endpoint.");
         }
-        (
-            _,
-            Reply::SignedIn
-            | Reply::SignedOut
-            | Reply::CredentialsRequired
-            | Reply::VerificationRequired,
-        ) => bail!("Unexpected reply from the native authentication endpoint."),
+        (_, Reply::SignedIn | Reply::CredentialsRequired | Reply::VerificationRequired) => {
+            bail!("Unexpected reply from the authentication endpoint.")
+        }
     };
     println!("{message}");
-    Ok(())
-}
-
-async fn play_track(client: &mut Client, track_id: String) -> Result<()> {
-    let reply = auth_reply(client.play_track(track_id).await)?;
-    match reply {
-        Reply::Played {
-            sample_rate,
-            bits_per_sample,
-            channels,
-        } => println!("Played at {sample_rate} Hz, {bits_per_sample}-bit, {channels} channels."),
-        Reply::LicenceDenied => bail!("Apple Music denied the playback licence for this track."),
-        Reply::TrialFailed { stage } => {
-            let stage = match stage {
-                TrialStage::Session => "session setup",
-                TrialStage::Storefront => "Apple Music storefront lookup",
-                TrialStage::Catalogue => "catalogue lookup",
-                TrialStage::CatalogueAuthorization => {
-                    bail!("Apple Music rejected catalogue authorization for the native session.")
-                }
-                TrialStage::CatalogueTrack => bail!(
-                    "Apple Music could not find that song in your storefront. Check the song ID."
-                ),
-                TrialStage::CatalogueAsset => {
-                    bail!("Apple Music returned no lossless asset for that song.")
-                }
-                TrialStage::Stream => "streaming",
-                TrialStage::Output => "audio output",
-            };
-            bail!("Native playback failed during {stage}.");
-        }
-        Reply::SignedOut => bail!("No native Apple Music session is active. Run `climat sign-in`."),
-        Reply::Busy => bail!("The native Apple Music session is busy. Try again shortly."),
-        Reply::Expired => bail!("The native playback request expired. Try again."),
-        Reply::Rejected => bail!("The native playback request was rejected."),
-        Reply::Failed => bail!("Native playback failed."),
-        Reply::CredentialsRequired
-        | Reply::VerificationRequired
-        | Reply::VerificationUnsupported
-        | Reply::SignedIn
-        | Reply::Playing
-        | Reply::Paused
-        | Reply::Position { .. }
-        | Reply::Stopped => {
-            bail!("Unexpected reply to the native playback request.");
-        }
-    }
     Ok(())
 }
 
@@ -197,7 +128,7 @@ async fn sign_in(client: &mut Client) -> Result<Reply> {
 }
 
 fn auth_reply(reply: io::Result<Reply>) -> Result<Reply> {
-    reply.map_err(|_| anyhow!("Communication with the native authentication endpoint failed."))
+    reply.map_err(|_| anyhow!("Communication with the authentication endpoint failed."))
 }
 
 struct SignInTerminal {
@@ -207,7 +138,7 @@ struct SignInTerminal {
 
 impl SignInTerminal {
     fn open() -> Result<Self> {
-        let tty_required = || anyhow!("Native sign-in requires an interactive terminal.");
+        let tty_required = || anyhow!("Sign-in requires an interactive terminal.");
         if !io::stdin().is_terminal() {
             return Err(tty_required());
         }
@@ -230,7 +161,7 @@ impl SignInTerminal {
     }
 
     async fn prompt(&self, label: &str, echo: bool) -> Result<String> {
-        let input_failed = || anyhow!("Could not read from the native sign-in terminal.");
+        let input_failed = || anyhow!("Could not read from the sign-in terminal.");
         let mut mode = self.original;
         if echo {
             mode.c_lflag |= libc::ECHO;
@@ -244,7 +175,7 @@ impl SignInTerminal {
         mode.c_cc[libc::VQUIT] = libc::_POSIX_VDISABLE;
         mode.c_cc[libc::VSUSP] = libc::_POSIX_VDISABLE;
         set_terminal(self.tty.as_raw_fd(), &mode)
-            .map_err(|_| anyhow!("Could not set terminal echo for native sign-in."))?;
+            .map_err(|_| anyhow!("Could not set terminal echo for sign-in."))?;
 
         let mut tty = self.tty.get_ref();
         tty.write_all(label.as_bytes())
@@ -262,12 +193,12 @@ impl SignInTerminal {
         }
         line.truncate(count);
         if line.pop() != Some(b'\n') {
-            bail!("Native sign-in input cancelled.");
+            bail!("Sign-in input cancelled.");
         }
         if line.is_empty() {
-            bail!("Native sign-in input cannot be empty.");
+            bail!("Sign-in input cannot be empty.");
         }
-        String::from_utf8(line).map_err(|_| anyhow!("Native sign-in input must be valid UTF-8."))
+        String::from_utf8(line).map_err(|_| anyhow!("Sign-in input must be valid UTF-8."))
     }
 }
 

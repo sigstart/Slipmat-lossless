@@ -6,7 +6,6 @@
 
 use slipmat_core::entry::Entry;
 use slipmat_core::ipc::View;
-use slipmat_core::library_cache;
 use slipmat_core::music::types::{Album, Artist, Playlist, Track};
 use slipmat_core::sort::SortBy;
 
@@ -19,18 +18,6 @@ pub struct Library {
 }
 
 impl Library {
-    /// What was on disk last time. An empty library is not an error — it means
-    /// the first browse waits on Apple instead of answering instantly.
-    pub fn from_cache() -> Self {
-        let cached = library_cache::load();
-        Self {
-            tracks: cached.songs,
-            albums: cached.albums,
-            artists: cached.artists,
-            playlists: cached.playlists,
-        }
-    }
-
     /// One window of one section.
     ///
     /// Returns the total *before* the window, so a client can size a scrollbar

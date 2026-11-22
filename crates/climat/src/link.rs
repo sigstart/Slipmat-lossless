@@ -65,7 +65,7 @@ async fn connect_daemon() -> Result<UnixStream> {
     Ok(UnixStream::from_std(stream)?)
 }
 
-/// The main socket is bound before native auth. Wait for a reply so a
+/// The main socket is bound before the sign-in endpoint. Wait for a reply so a
 /// cold-starting sign-in only retries after the auth endpoint is ready.
 pub async fn wait_for_daemon() -> Result<()> {
     let mut stream = connect_daemon().await?;

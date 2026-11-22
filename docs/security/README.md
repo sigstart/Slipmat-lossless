@@ -1,6 +1,6 @@
 # Security audit runbook
 
-> Historical audit scope. The current Slipmat daemon uses the native provider exclusively.
+> Historical audit scope. The current Slipmat daemon uses the FairPlay provider exclusively.
 
 This runbook covers the two checkouts in `Slipmat-ALAC/`. `Slipmat/` is the
 primary Rust and Electron application. `INSPIRATION/apple-music-linux/` is a

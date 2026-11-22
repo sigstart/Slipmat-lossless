@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Miguel Rincon
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Queue commands, playback state, and native catalogue credentials.
+//! Queue commands, playback state, and catalogue credentials.
 
 use serde::{Deserialize, Serialize};
 
-/// Commands for the daemon's native queue.
+/// Commands for the daemon's queue.
 #[derive(Debug, Clone)]
 pub enum Command {
     SetQueue {

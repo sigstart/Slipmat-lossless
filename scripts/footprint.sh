@@ -122,9 +122,7 @@ mapfile -t PIDS < <(printf '%s\n' "${PIDS[@]}" | sort -nu)
 role() {
 	local cmd=$1
 	case "$cmd" in
-	*fairplay-alac-output*) echo "native audio output" ;;
-	*profile-store*) echo "native profile helper" ;;
-	*/app/provider*) echo "native playback provider" ;;
+	*/app/fairplay-provider*) echo "FairPlay provider" ;;
 	*glycin*) echo "image decoder (sandboxed)" ;;
 	*bwrap*) echo "sandbox wrapper" ;;
 	*slipmatd*) echo "the daemon (Rust)" ;;

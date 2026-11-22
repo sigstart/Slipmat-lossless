@@ -3,7 +3,7 @@
 
 //! Thin async wrapper over `api.music.apple.com`.
 //!
-//! The native provider supplies both tokens. The developer token authenticates
+//! The FairPlay provider supplies both tokens. The developer token authenticates
 //! the request and the Music User Token authorizes account access.
 
 use anyhow::{Context, Result};
@@ -70,7 +70,7 @@ pub enum ApiError {
 }
 
 impl Client {
-    pub fn native(
+    pub fn new(
         developer_token: String,
         music_user_token: String,
         storefront: String,
@@ -133,28 +133,10 @@ impl Client {
         self.music_user_token.is_some()
     }
 
-    /// Turn a failed response into an error that carries Apple's own words.
-    ///
-    /// Apple returns a JSON body like
-    /// `{"errors":[{"title":"Unauthorized","detail":"…"}]}`, and that detail is
-    /// usually the difference between an hour of guessing and a one-line fix.
-    /// The status alone is not enough — a bare 401 was what sent us chasing a
-    /// sign-in problem that did not exist.
-    async fn explain(&self, res: reqwest::Response) -> anyhow::Error {
-        let status = res.status();
-        let err = Self::diagnose(status, self.signed_in());
-        match res.text().await {
-            Ok(body) if !body.trim().is_empty() => {
-                let mut detail = body.trim().replace('\n', " ");
-                detail.truncate(400);
-                tracing::warn!(%status, %detail, "apple music api error");
-                anyhow::anyhow!("{err} — {detail}")
-            }
-            _ => {
-                tracing::warn!(%status, "apple music api error with no body");
-                err.into()
-            }
-        }
+    fn explain(&self, response: reqwest::Response) -> anyhow::Error {
+        let status = response.status();
+        tracing::warn!(%status, "apple music api error");
+        Self::diagnose(status, self.signed_in()).into()
     }
 
     /// The user's whole saved-songs library.
@@ -284,7 +266,7 @@ impl Client {
             .context(what)?;
 
         if !res.status().is_success() {
-            return Err(self.explain(res).await);
+            return Err(self.explain(res));
         }
         Ok(())
     }
@@ -305,26 +287,14 @@ impl Client {
             .iter()
             .filter(|p| !p.last_modified.is_empty())
             .count();
-        // **Named, not just counted**, because a count answered the wrong
-        // question: this is the *list* endpoint, and a page is built from
-        // `/me/library/playlists/{id}` — a different request, which can carry
-        // different attributes. The names are what let the two be compared.
-        let with_art: Vec<&str> = playlists
-            .iter()
-            .filter(|p| p.artwork.is_some())
-            .map(|p| p.name.as_str())
-            .collect();
-        let without_art: Vec<&str> = playlists
-            .iter()
-            .filter(|p| p.artwork.is_none())
-            .map(|p| p.name.as_str())
-            .collect();
+        let with_art = playlists.iter().filter(|p| p.artwork.is_some()).count();
+        let without_art = playlists.len() - with_art;
         tracing::info!(
             total = playlists.len(),
             dated,
             modified,
-            ?with_art,
-            ?without_art,
+            with_art,
+            without_art,
             "library playlist attributes present"
         );
         Ok(playlists)
@@ -375,7 +345,7 @@ impl Client {
             .context("requesting playlist")?;
 
         if !res.status().is_success() {
-            return Err(self.explain(res).await);
+            return Err(self.explain(res));
         }
 
         let parsed: Response<Resource<PlaylistAttributes>> =
@@ -520,7 +490,7 @@ impl Client {
         }
 
         if !res.status().is_success() {
-            return Err(self.explain(res).await);
+            return Err(self.explain(res));
         }
 
         let parsed: Response<R> = res
@@ -567,7 +537,7 @@ impl Client {
             .context("searching the catalog")?;
 
         if !res.status().is_success() {
-            return Err(self.explain(res).await);
+            return Err(self.explain(res));
         }
 
         // Search nests its payload differently to every other endpoint:
@@ -714,7 +684,7 @@ impl Client {
             .context("requesting song")?;
 
         if !res.status().is_success() {
-            return Err(self.explain(res).await);
+            return Err(self.explain(res));
         }
 
         let parsed: Response<SongContainers> = res.json().await.context("decoding song")?;
@@ -755,7 +725,7 @@ impl Client {
             .context("requesting album")?;
 
         if !res.status().is_success() {
-            return Err(self.explain(res).await);
+            return Err(self.explain(res));
         }
 
         let parsed: Response<AlbumResource> = res.json().await.context("decoding album")?;
@@ -834,7 +804,7 @@ impl Client {
             .context("requesting library artist albums")?;
 
         if !res.status().is_success() {
-            return Err(self.explain(res).await);
+            return Err(self.explain(res));
         }
 
         let parsed: Response<Resource<AlbumAttributes>> =
@@ -864,7 +834,7 @@ impl Client {
             .context("requesting artist")?;
 
         if !res.status().is_success() {
-            return Err(self.explain(res).await);
+            return Err(self.explain(res));
         }
 
         let parsed: Response<ArtistResource> = res.json().await.context("decoding artist")?;
@@ -936,9 +906,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn native_library_writes_use_account_headers_without_a_web_origin() {
-        let client =
-            Client::native("test-developer".into(), "test-user".into(), "us".into()).unwrap();
+    fn library_writes_use_account_headers_without_a_web_origin() {
+        let client = Client::new("test-developer".into(), "test-user".into(), "us".into()).unwrap();
         for path in ["/me/library?ids[songs]=123", "/me/favorites?ids[songs]=123"] {
             let request = client.post(path).build().unwrap();
             assert_eq!(request.method(), reqwest::Method::POST);

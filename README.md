@@ -11,8 +11,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 Apple Music for Linux with a native interface.
 
-Slipmat and its terminal client, CLImat, share one daemon and queue. Source
-builds use native FairPlay playback on Linux x86-64.
+Slipmat and its terminal client, CLImat, share one daemon and queue. Native
+FairPlay playback on Linux x86-64 requires a configured provider.
 
 <p align="center">
   <img src="docs/screenshots/library.webp" alt="Slipmat showing a library of songs with the sidebar collapsed: the playing track marked in red, two Apple cannot stream greyed out, a menu button on every row, and the Now Playing bar along the bottom with the playing track's cover behind it">
@@ -72,48 +72,47 @@ builds use native FairPlay playback on Linux x86-64.
 ## Install
 
 Slipmat needs Linux x86-64, an active Apple Music subscription, and a network
-connection. Prepare the native provider from the checkout before launching
-either client. See [Development](#development) and the
-[FairPlay staging guide](vendor/fairplay/README.md).
+connection. The source installer stages the FairPlay libraries.
+Sign-in and playback require a FairPlay provider that implements Slipmat's
+provider protocol. Build it with `make fairplay-provider`. See the
+[FairPlay setup guide](vendor/fairplay/README.md).
 
 On Arch, the development AUR packages are `slipmat-git` and `climat-git`.
-Either client pulls in the shared daemon. The native provider still needs the
-local preparation step.
+Either client pulls in the shared daemon. Use `make fairplay-libs` from the
+checkout to stage the libraries for local development.
 
 ### From source
 
 Install Rust ≥ 1.93, the GTK and libadwaita development packages, libpulse,
-a C/C++ toolchain, Go, Git, and Bubblewrap. Linux Secret Service and
-`secret-tool` enable session restoration. Run `make install` to install GTK,
-CLImat, and the daemon under `~/.local`.
+a C toolchain, and curl. Run `make install` to install GTK, CLImat, and the
+daemon under `~/.local` and fetch the pinned FairPlay libraries into the checkout.
 
 ### First run
 
-Sign in from the GTK dialog or run `climat sign-in` in a terminal. Both clients
-use the same session for playback, search, and library access. CLImat uses
-**Shift+A** to add a song and **Shift+F** to favourite it.
+With a provider configured, sign in from the GTK dialog or run
+`climat sign-in` in a terminal. Both clients use the same session for playback,
+search, and library access. CLImat uses **Shift+A** to add a song and
+**Shift+F** to favourite it.
 
 ## How it works
 
-`slipmatd` owns the queue, catalogue and library requests, and MPRIS. The native
+`slipmatd` owns the queue, catalogue and library requests, and MPRIS. The FairPlay
 provider opens the licensed ALAC stream, and Symphonia decodes it for the local
-PulseAudio-compatible server. With Secret Service available, the provider can
-restore an encrypted session profile after a daemon restart.
+PulseAudio-compatible server. With Secret Service available, the daemon saves
+the provider's session encrypted and restores it after a restart, so you sign
+in once.
 
 Queue playback, pause, and skips work across both clients. Seeking, shuffle,
 repeat, gapless transitions, removing library songs, and unfavouriting are
-currently unavailable. The Flatpak is a build artifact pending a native
+currently unavailable. The Flatpak is a build artifact pending a FairPlay
 provider setup for that distribution.
 
 ## Development
 
-Prepare the provider from a desktop session with a local PulseAudio-compatible
-socket. The script verifies the staged FairPlay libraries, builds the provider
-and Symphonia output, and registers the launcher in the user's Slipmat state
-directory. Run it again after changing the provider or moving the checkout.
+Stage the FairPlay libraries and build Slipmat from the checkout.
 
 ```bash
-sh scripts/fairplay-trial/prepare.sh
+sh scripts/fairplay/prepare.sh
 cargo build --locked --workspace
 target/debug/slipmat                        # the GNOME app
 target/debug/climat                         # the terminal player
@@ -132,8 +131,7 @@ each change.
 
 ## Related
 
-Slipmat builds on [Adam](vendor/fairplay/README.md)'s native
-playback work. [Sidra](https://github.com/wimpysworld/sidra) and
+[Sidra](https://github.com/wimpysworld/sidra) and
 [Cider](https://cider.sh) helped establish Apple Music clients on Linux.
 
 ## Licence

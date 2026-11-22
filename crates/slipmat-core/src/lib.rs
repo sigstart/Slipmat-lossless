@@ -8,15 +8,15 @@
 //! lifetime, our mirror of its state, and the catalog client.
 
 pub mod artwork;
+pub mod auth;
+#[doc(hidden)]
+pub mod auth_wire;
 pub mod catalog;
 pub mod entry;
 pub mod ipc;
 pub mod library_cache;
 pub mod mpris;
 pub mod music;
-pub mod native_auth;
-#[doc(hidden)]
-pub mod native_auth_wire;
 pub mod paths;
 pub mod player;
 pub mod queue;

@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/fairplay-provider",
+    "crates/fairplay-wire",
     "crates/slipmat-core",
     "crates/slipmat-playback",
     "crates/slipmatd",
@@ -8,7 +10,7 @@ members = [
     "crates/climat",
 ]
 
-# Shared so the two crates cannot drift apart on a version.
+# Shared so the crates cannot drift apart on a version.
 [workspace.package]
 version = "0.13.0-dev"
 edition = "2024"

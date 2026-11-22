@@ -11,14 +11,28 @@ fi
 
 repo=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 stage="$repo/vendor/fairplay/x86_64"
-rootfs="$stage/rootfs"
-lib64="$rootfs/system/lib64"
-(cd "$lib64" && sha256sum --check --quiet "$stage/SHA256SUMS")
-(cd "$stage" && sha256sum --check --quiet COMPAT-SHA256SUMS)
+sh "$repo/scripts/fetch-fairplay-libs.sh" --check
+(cd "$stage" && sed -n '/  compat\//p' COMPAT-SHA256SUMS | sha256sum --check --quiet --strict)
 
 work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
-mkdir "$work/data"
+rootfs="$work/rootfs"
+lib64="$rootfs/system/lib64"
+mkdir -p "$work/data" "$lib64"
+while read -r digest name; do
+    case "$digest" in ''|'#'*|source) continue ;; esac
+    ln -s "$stage/rootfs/system/lib64/$name" "$lib64/$name"
+done < "$stage/fairplay-libs.lock"
+
+# The Android linker resolves these SONAMEs during startup. The probe
+# exercises library loading only and never requests Android audio services.
+printf 'LIBC {};\n' > "$work/libdl.map"
+for name in libandroid.so libOpenSLES.so libdl.so; do
+    set --
+    if [ "$name" = libdl.so ]; then set -- "-Wl,--version-script=$work/libdl.map"; fi
+    cc -shared -nostdlib -fPIC -Wl,--hash-style=both "-Wl,-soname,$name" "$@" \
+        -x c /dev/null -o "$lib64/$name"
+done
 cc -std=c11 -Wall -Wextra -Werror -x c -o "$work/probe" - -ldl <<'C'
 #include <dlfcn.h>
 #include <stddef.h>

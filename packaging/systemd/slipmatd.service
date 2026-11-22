@@ -2,7 +2,7 @@
 #
 #   systemctl --user enable --now slipmatd
 #
-# Optional user service for the native provider and shared playback queue.
+# Optional user service for the FairPlay provider and shared playback queue.
 
 [Unit]
 Description=Slipmat daemon

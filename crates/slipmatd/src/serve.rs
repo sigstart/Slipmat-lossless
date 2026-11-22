@@ -1,13 +1,14 @@
 // SPDX-FileCopyrightText: 2026 Miguel Rincon
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Native playback and Apple Music services over the daemon socket.
+//! Playback and Apple Music services over the daemon socket.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use slipmat_core::artwork;
+use slipmat_core::auth_wire::{Reader, verify_peer};
 use slipmat_core::catalog;
 use slipmat_core::entry::Entry;
 use slipmat_core::ipc::{
@@ -16,8 +17,8 @@ use slipmat_core::ipc::{
 use slipmat_core::music::client::Client;
 use slipmat_core::music::types::Artwork;
 use slipmat_core::player::protocol::{Command, Item};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream, unix::OwnedWriteHalf};
+use tokio::io::AsyncWriteExt;
+use tokio::net::{UnixStream, unix::OwnedWriteHalf};
 use tokio::sync::broadcast;
 
 use crate::bus;
@@ -30,16 +31,19 @@ use crate::state::Model;
 /// holding the backlog for it would make every other client's memory its
 /// problem. `broadcast` tells it how far it lagged; it can ask for a snapshot.
 const BACKLOG: usize = 64;
+const PROVIDER_UNAVAILABLE: &str = "The FairPlay provider is unavailable. Check the launcher path in Slipmat’s fairplay-provider setting.";
 
 /// Position ticks while playing. The same cadence the GTK client uses.
 const TICK_MS: u64 = 500;
 
 pub struct Daemon {
     pub model: RefCell<Model>,
-    native: tokio::sync::mpsc::UnboundedSender<Command>,
-    native_auth: Option<Rc<crate::native_auth::Service>>,
+    queue: tokio::sync::mpsc::UnboundedSender<(u64, Command)>,
+    auth: Option<Rc<crate::auth::Service>>,
+    pub(super) queue_epoch: std::cell::Cell<u64>,
+    sign_out_epoch: std::cell::Cell<u64>,
     catalogue_items: RefCell<std::collections::HashMap<String, Item>>,
-    native_sign_in_required: std::cell::Cell<bool>,
+    sign_in_required: std::cell::Cell<bool>,
     pub events: broadcast::Sender<Event>,
     /// The bus. Filled in after the daemon exists, because it needs one.
     pub mpris: RefCell<Option<slipmat_core::mpris::Mpris>>,
@@ -65,24 +69,24 @@ pub struct Daemon {
 
 impl Daemon {
     pub fn send(&self, cmd: Command) {
-        if self.native.send(cmd).is_err() {
+        if self.queue.send((self.queue_epoch.get(), cmd)).is_err() {
             self.publish(Event::Error {
-                detail: "The native queue worker stopped.".into(),
+                detail: "The queue worker stopped.".into(),
             });
         }
     }
 
-    pub(super) fn native_sign_in_required(&self) -> bool {
-        self.native_sign_in_required.get()
+    pub(super) fn sign_in_required(&self) -> bool {
+        self.sign_in_required.get()
     }
 
-    pub(super) fn require_native_sign_in(&self, required: bool) {
-        if self.native_sign_in_required.replace(required) != required {
-            self.publish(Event::NativeSignIn { required });
+    pub(super) fn require_sign_in(&self, required: bool) {
+        if self.sign_in_required.replace(required) != required {
+            self.publish(Event::SignInRequired { required });
         }
     }
 
-    pub fn native_items(&self, songs: Vec<String>) -> Vec<Item> {
+    pub fn queue_items(&self, songs: Vec<String>) -> Vec<Item> {
         let model = self.model.borrow();
         let library: std::collections::HashMap<_, _> = model
             .library
@@ -97,7 +101,7 @@ impl Daemon {
                 catalogue
                     .get(&id)
                     .cloned()
-                    .or_else(|| library.get(id.as_str()).map(|track| native_item(track)))
+                    .or_else(|| library.get(id.as_str()).map(|track| queue_item(track)))
                     .unwrap_or_else(|| Item {
                         title: id.clone(),
                         catalog_id: Some(id),
@@ -114,7 +118,7 @@ impl Daemon {
                 if let Entry::Song(track) = entry
                     && let Some(id) = &track.catalog_id
                 {
-                    catalogue.insert(id.clone(), native_item(track));
+                    catalogue.insert(id.clone(), queue_item(track));
                 }
             }
         }
@@ -131,7 +135,7 @@ impl Daemon {
     fn client(&self) -> Option<Client> {
         let model = self.model.borrow();
         let tokens = model.tokens.as_ref()?;
-        Client::native(
+        Client::new(
             tokens.developer_token.clone(),
             tokens.music_user_token.clone()?,
             tokens.storefront.clone(),
@@ -147,7 +151,7 @@ impl Daemon {
     }
 }
 
-fn native_item(track: &slipmat_core::music::types::Track) -> Item {
+fn queue_item(track: &slipmat_core::music::types::Track) -> Item {
     Item {
         id: track
             .library_id
@@ -165,42 +169,32 @@ fn native_item(track: &slipmat_core::music::types::Track) -> Item {
 }
 
 pub async fn run(provider: Option<std::path::PathBuf>) -> Result<()> {
-    let path = ipc::socket_path().context("XDG_RUNTIME_DIR is not set")?;
-
-    // A stopped daemon can leave a socket behind. Keep any listener that responds.
-    if path.exists() {
-        match std::os::unix::net::UnixStream::connect(&path) {
-            Ok(_) => anyhow::bail!("a daemon is already listening on {}", path.display()),
-            // Nobody home — the file is a leftover.
-            Err(_) => {
-                tracing::info!(socket = %path.display(), "removing a stale socket");
-                std::fs::remove_file(&path).with_context(|| format!("removing {path:?}"))?;
-            }
-        }
-    }
-    let listener = UnixListener::bind(&path).with_context(|| format!("binding {path:?}"))?;
+    use std::os::unix::fs::PermissionsExt;
+    let path = ipc::socket_path()?;
+    let listener = crate::auth::bind_listener(&path).await?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     tracing::info!(socket = %path.display(), "listening");
 
-    let native_auth = match provider {
-        Some(provider) => match crate::native_auth::Endpoint::bind(provider).await {
+    let auth = match provider {
+        Some(provider) => match crate::auth::Endpoint::bind(provider.clone()).await {
             Ok(endpoint) => Some(endpoint),
             Err(err) => {
-                tracing::warn!(%err, "native sign-in socket unavailable");
+                tracing::warn!(launcher = %provider.display(), %err, "sign-in unavailable");
                 None
             }
         },
         None => None,
     };
     let (events, _) = broadcast::channel(BACKLOG);
-    let (native_sender, native_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (queue_sender, queue_receiver) = tokio::sync::mpsc::unbounded_channel();
     let daemon = Rc::new(Daemon {
         model: RefCell::new(Model::new()),
-        native: native_sender,
-        native_auth: native_auth
-            .as_ref()
-            .map(crate::native_auth::Endpoint::service),
+        queue: queue_sender,
+        auth: auth.as_ref().map(crate::auth::Endpoint::service),
+        queue_epoch: Default::default(),
+        sign_out_epoch: Default::default(),
         catalogue_items: RefCell::new(Default::default()),
-        native_sign_in_required: std::cell::Cell::new(false),
+        sign_in_required: std::cell::Cell::new(false),
         events,
         mpris: RefCell::new(None),
         refreshing: std::cell::Cell::new(None),
@@ -213,21 +207,28 @@ pub async fn run(provider: Option<std::path::PathBuf>) -> Result<()> {
     });
 
     *daemon.mpris.borrow_mut() = Some(bus::start(&daemon));
-    tokio::task::spawn_local(crate::native_queue::run(
+    tokio::task::spawn_local(crate::queue::run(
         daemon.clone(),
-        daemon.native_auth.clone(),
-        native_receiver,
+        daemon.auth.clone(),
+        queue_receiver,
     ));
-    restore_session(&daemon);
 
     // Accept loop: one task per client, each holding a handle to the daemon.
     let accepting = daemon.clone();
+    let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(32));
     tokio::task::spawn_local(async move {
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
+                    if verify_peer(&stream).is_err() {
+                        continue;
+                    }
+                    let Ok(permit) = permits.clone().try_acquire_owned() else {
+                        continue;
+                    };
                     let daemon = accepting.clone();
                     tokio::task::spawn_local(async move {
+                        let _permit = permit;
                         daemon.clients.set(daemon.clients.get() + 1);
                         if let Err(err) = client(stream, daemon.clone()).await {
                             tracing::debug!(?err, "client gone");
@@ -251,7 +252,7 @@ pub async fn run(provider: Option<std::path::PathBuf>) -> Result<()> {
         let mut tick = tokio::time::interval(std::time::Duration::from_millis(TICK_MS));
         loop {
             tick.tick().await;
-            sync_native_catalogue(&ticking);
+            sync_catalogue(&ticking);
             // **Whoever moved it, everyone hears.** The desktop's audio panel
             // can change this without Slipmat being asked, and a client still
             // showing the old number is the disagreement this whole thing
@@ -290,11 +291,16 @@ pub async fn run(provider: Option<std::path::PathBuf>) -> Result<()> {
             _ = leaving.quitting.notified() => "a client quit",
         };
         tracing::info!(why, "shutting down");
-        save_session(&leaving);
+        if let Some(service) = &leaving.auth {
+            service.wait_for_profile_save().await;
+        }
+        if leaving.model.borrow().stage != Stage::Connecting {
+            save_session(&leaving);
+        }
         // The socket outlives the process that made it, and a leftover one
         // answers for a daemon that is not running.
         let _ = std::fs::remove_file(&socket);
-        drop(native_auth);
+        drop(auth);
         std::process::exit(0);
     });
 
@@ -325,35 +331,72 @@ pub(super) fn save_session(daemon: &Daemon) {
     });
 }
 
-fn sync_native_catalogue(daemon: &Rc<Daemon>) {
-    let next = daemon
-        .native_auth
-        .as_ref()
-        .and_then(|service| service.catalogue());
+fn clear_playback(daemon: &Daemon) {
+    daemon
+        .queue_epoch
+        .set(daemon.queue_epoch.get().wrapping_add(1));
+    daemon.send(Command::ClearQueue);
+    let mut model = daemon.model.borrow_mut();
+    model.player = slipmat_core::player::PlayerState::new();
+    model.art_path = None;
+    drop(model);
+    daemon.art_for.borrow_mut().take();
+    daemon.require_sign_in(false);
+    slipmat_core::session::clear();
+    daemon.publish(Event::Queue {
+        items: Vec::new(),
+        position: 0,
+    });
+    daemon.publish_snapshot();
+}
+
+fn sync_catalogue(daemon: &Rc<Daemon>) {
+    let next = daemon.auth.as_ref().and_then(|service| service.catalogue());
     let stage = if next.is_some() {
         Stage::Ready
     } else if daemon.model.borrow().stage == Stage::Connecting
         && daemon
-            .native_auth
+            .auth
             .as_ref()
             .is_some_and(|service| service.is_authenticating())
     {
         Stage::Connecting
-    } else if daemon.native_auth.is_some() {
+    } else if daemon.auth.is_some() {
         Stage::SignedOut
     } else {
         Stage::Broken {
-            detail: "Prepare the native FairPlay provider to sign in.".into(),
+            detail: PROVIDER_UNAVAILABLE.into(),
         }
     };
 
     let mut model = daemon.model.borrow_mut();
-    let changed = model.tokens != next;
+    let signed_out = daemon.auth.as_ref().is_some_and(|service| {
+        daemon.sign_out_epoch.replace(service.sign_out_epoch()) != service.sign_out_epoch()
+    });
+    let changed = signed_out || model.tokens != next;
+    let ended = signed_out || (model.tokens.is_some() && changed);
+    let startup_failed =
+        model.stage == Stage::Connecting && next.is_none() && stage != Stage::Connecting;
+    let restored = next.is_some()
+        && daemon
+            .auth
+            .as_ref()
+            .is_some_and(|service| service.take_restored());
     if changed {
         model.tokens = next;
         model.library = Library::default();
     }
     drop(model);
+    if ended {
+        clear_playback(daemon);
+    } else if restored {
+        restore_session(daemon);
+    } else if startup_failed || (changed && daemon.model.borrow().player.queue.is_empty()) {
+        slipmat_core::session::clear();
+    }
+    if startup_failed {
+        slipmat_core::library_cache::clear();
+    }
     if changed {
         daemon.catalogue_items.borrow_mut().clear();
         slipmat_core::library_cache::clear();
@@ -375,17 +418,24 @@ fn sync_native_catalogue(daemon: &Rc<Daemon>) {
 
 async fn client(stream: UnixStream, daemon: Rc<Daemon>) -> Result<()> {
     let (read, mut write) = stream.into_split();
-    let mut lines = BufReader::new(read).lines();
+    let mut frames = Reader::with_limit(read, 256 * 1024);
     let mut feed: Option<broadcast::Receiver<Event>> = None;
     let mut sent_capabilities = false;
+    let mut first = true;
+    let deadline = tokio::time::Instant::now() + slipmat_core::auth_wire::FIRST_REQUEST_TIMEOUT;
 
     loop {
         // Either the client says something, or — once subscribed — the daemon
         // does. `biased` so a request is never starved by a busy event stream.
         let outgoing = tokio::select! {
             biased;
-            line = lines.next_line() => match line? {
-                Some(line) => answer(&line, &daemon, &mut feed),
+            _ = tokio::time::sleep_until(deadline), if first => return Ok(()),
+            frame = frames.frame() => match frame? {
+                Some(request) => {
+                    first = false;
+                    sync_catalogue(&daemon);
+                    answer(request, &daemon, &mut feed)
+                },
                 None => return Ok(()), // client hung up
             },
             event = recv(&mut feed) => Some(event?),
@@ -398,7 +448,6 @@ async fn client(stream: UnixStream, daemon: Rc<Daemon>) -> Result<()> {
             write_event(
                 &mut write,
                 &Event::PlaybackCapabilities {
-                    native: true,
                     seek: false,
                     shuffle: false,
                     repeat: false,
@@ -407,8 +456,8 @@ async fn client(stream: UnixStream, daemon: Rc<Daemon>) -> Result<()> {
             .await?;
             write_event(
                 &mut write,
-                &Event::NativeSignIn {
-                    required: daemon.native_sign_in_required(),
+                &Event::SignInRequired {
+                    required: daemon.sign_in_required(),
                 },
             )
             .await?;
@@ -420,7 +469,7 @@ async fn client(stream: UnixStream, daemon: Rc<Daemon>) -> Result<()> {
 async fn write_event(write: &mut OwnedWriteHalf, event: &Event) -> Result<()> {
     let mut line = serde_json::to_vec(event)?;
     line.push(b'\n');
-    write.write_all(&line).await?;
+    tokio::time::timeout(std::time::Duration::from_secs(5), write.write_all(&line)).await??;
     Ok(())
 }
 
@@ -436,22 +485,10 @@ async fn recv(feed: &mut Option<broadcast::Receiver<Event>>) -> Result<Event> {
 }
 
 fn answer(
-    line: &str,
+    request: Request,
     daemon: &Rc<Daemon>,
     feed: &mut Option<broadcast::Receiver<Event>>,
 ) -> Option<Event> {
-    let request: Request = match serde_json::from_str(line) {
-        Ok(request) => request,
-        Err(_) => {
-            // Loudly, per rule 4: a client sending something we cannot read is
-            // a version mismatch, and silence would make it look like a hang.
-            tracing::warn!("unreadable request");
-            return Some(Event::Error {
-                detail: "Unreadable daemon request.".into(),
-            });
-        }
-    };
-
     match request {
         Request::Subscribe => {
             if feed.is_none() {
@@ -489,19 +526,19 @@ fn answer(
                 total,
             })
         }
-        Request::SignIn => Some(if daemon.native_auth.is_some() {
-            Event::NativeSignIn { required: true }
+        Request::SignIn => Some(if daemon.auth.is_some() {
+            Event::SignInRequired { required: true }
         } else {
             Event::Error {
-                detail: "Prepare the native FairPlay provider to sign in.".into(),
+                detail: PROVIDER_UNAVAILABLE.into(),
             }
         }),
         Request::SignOut => {
-            if let Some(service) = daemon.native_auth.clone() {
+            if let Some(service) = daemon.auth.clone() {
                 let daemon = daemon.clone();
                 tokio::task::spawn_local(async move {
-                    if service.sign_out().await == slipmat_core::native_auth::Reply::SignedOut {
-                        sync_native_catalogue(&daemon);
+                    if service.sign_out().await == slipmat_core::auth::Reply::SignedOut {
+                        sync_catalogue(&daemon);
                     } else {
                         daemon.publish(Event::Error {
                             detail: "Native sign-out failed.".into(),
@@ -642,13 +679,19 @@ pub(super) fn fetch_artwork(daemon: &Rc<Daemon>) {
     // Cleared first: a stale cover under a new track is worse than none, and
     // this is a network round trip.
     daemon.model.borrow_mut().art_path = None;
+    let art_template = art.template().to_owned();
+    let epoch = daemon.queue_epoch.get();
     let daemon = daemon.clone();
     tokio::task::spawn_local(async move {
         match artwork::fetch(art, artwork::ART_SIZE).await {
-            Ok(path) => {
+            Ok(path)
+                if epoch == daemon.queue_epoch.get()
+                    && *daemon.art_for.borrow() == Some(art_template) =>
+            {
                 daemon.model.borrow_mut().art_path = Some(path);
                 daemon.publish_snapshot();
             }
+            Ok(_) => {}
             // Cosmetic: a missing cover is not worth telling anyone about.
             Err(err) => tracing::warn!(?err, "artwork not fetched"),
         }
@@ -667,7 +710,7 @@ fn write(daemon: &Rc<Daemon>, action: WriteAction, id: String) {
         WriteAction::RemoveFromLibrary | WriteAction::Unfavorite
     ) {
         daemon.publish(Event::Error {
-            detail: "The native library supports adding and favouriting songs.".into(),
+            detail: "Slipmat can add and favourite songs, but not remove them.".into(),
         });
         return;
     }
@@ -851,7 +894,7 @@ fn search(daemon: &Rc<Daemon>, query: String, filter: CatalogFilter, offset: usi
         match found {
             Ok(results) => {
                 let (entries, paged) = catalog::catalog_rows(filter, results, offset == 0);
-                tracing::info!(%query, ?filter, offset, rows = entries.len(), "searched");
+                tracing::info!(?filter, offset, rows = entries.len(), "searched");
                 daemon.publish(Event::Results {
                     query,
                     entries,
@@ -862,7 +905,7 @@ fn search(daemon: &Rc<Daemon>, query: String, filter: CatalogFilter, offset: usi
                 });
             }
             Err(err) => {
-                tracing::warn!(?err, %query, "search failed");
+                tracing::warn!(?filter, offset, "search failed");
                 daemon.publish(Event::Error {
                     detail: format!("{err}"),
                 });
@@ -1008,10 +1051,12 @@ mod tests {
         let (events, _) = broadcast::channel(8);
         Rc::new(Daemon {
             model: RefCell::new(Model::new()),
-            native: tokio::sync::mpsc::unbounded_channel().0,
-            native_auth: None,
+            queue: tokio::sync::mpsc::unbounded_channel().0,
+            auth: None,
+            queue_epoch: Default::default(),
+            sign_out_epoch: Default::default(),
             catalogue_items: RefCell::new(Default::default()),
-            native_sign_in_required: std::cell::Cell::new(false),
+            sign_in_required: std::cell::Cell::new(false),
             events,
             mpris: RefCell::new(None),
             refreshing: std::cell::Cell::new(None),

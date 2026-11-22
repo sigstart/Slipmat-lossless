@@ -78,6 +78,9 @@ impl AppModel {
     /// and grid building, which is presentation rather than something to ask
     /// across a socket.
     pub(super) fn reload_from_cache(&mut self, sender: &ComponentSender<Self>) {
+        if !matches!(self.stage, super::Stage::Ready) {
+            return;
+        }
         let cached = slipmat_core::library_cache::load();
         tracing::info!(
             songs = cached.songs.len(),
@@ -461,33 +464,6 @@ impl AppModel {
                 GridItem::new(tile, registry.clone(), self.tile_art_request.clone())
             })
             .collect()
-    }
-
-    /// Fill the four collections from disk, before the sidecar is even up.
-    ///
-    /// Called once, from `init`. Nothing here decides *not* to fetch — the
-    /// loaders' `!is_empty()` guards do that on their own, which is the same
-    /// rule that makes revisiting a section instant.
-    pub(super) fn seed_from_cache(&mut self) {
-        let cached = slipmat_core::library_cache::load();
-        if cached.is_empty() {
-            return;
-        }
-        tracing::info!(
-            songs = cached.songs.len(),
-            albums = cached.albums.len(),
-            artists = cached.artists.len(),
-            playlists = cached.playlists.len(),
-            "opened on the cached library"
-        );
-        self.all_tracks = cached.songs;
-        self.albums = cached.albums;
-        self.artists = cached.artists;
-        self.playlists = cached.playlists;
-        // Only the section being opened into: the other three cost ~500ms each
-        // in cover decoding, and `SetView` builds them on the way in. Doing all
-        // four here would spend that before the window is even mapped.
-        self.rebuild_current_section();
     }
 
     /// Every artwork the library can account for, as cache keys.

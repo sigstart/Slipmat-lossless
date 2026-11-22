@@ -8,7 +8,7 @@ while Android provides the Java framework and audio services. Check
 `ro.product.cpu.abilist` with `getprop` inside Waydroid's Android shell. It
 should include `arm64-v8a` before you install the ARM64 sample.
 
-Use the sample build below with `--adam-libs` omitted. This packages the
+Use the sample build below with `--fairplay-libs` omitted. This packages the
 original ARM64 libraries from Apple's AAR. With the Waydroid session running,
 install and launch the result from Linux:
 
@@ -34,9 +34,9 @@ From the `Slipmat/` repository root, with JDK 17, Gradle 8.4, Android SDK
 Platform 34, Build Tools 34.0.0, and `adb` available:
 
 ```sh
-sdk="$PWD/../INSPIRATION/Android-MusicKit-SDK-1.1.4"
+sdk="/path/to/extracted/Android-MusicKit-SDK-1.1.4"
 app_dir=$(python3 scripts/musickit-probe/prepare.py "$sdk" --playback \
-  --adam-libs "$HOME/.config/adam/drm/rootfs/system/lib64" \
+  --fairplay-libs "$PWD/vendor/fairplay/x86_64/rootfs/system/lib64" \
   --developer-token-file /path/to/your/developer-token.txt)
 gradle -p "$app_dir" assembleDebug
 adb install -r "$app_dir/build/outputs/apk/debug/SlipmatMusicKitProbe-debug.apk"
@@ -69,9 +69,9 @@ emulator or test device, then run from the `Slipmat/` repository root.
 adb devices
 adb shell getprop ro.product.cpu.abilist
 
-sdk="$PWD/../INSPIRATION/Android-MusicKit-SDK-1.1.4"
+sdk="/path/to/extracted/Android-MusicKit-SDK-1.1.4"
 probe_dir=$(python3 scripts/musickit-probe/prepare.py "$sdk" \
-  --adam-libs "$HOME/.config/adam/drm/rootfs/system/lib64")
+  --fairplay-libs "$PWD/vendor/fairplay/x86_64/rootfs/system/lib64")
 
 gradle -p "$probe_dir" assembleDebug
 apk="$probe_dir/build/outputs/apk/debug/SlipmatMusicKitProbe-debug.apk"
@@ -92,7 +92,7 @@ last `BEGIN` marker and the corresponding crash lines. A native load error
 identifies a missing dependency, incompatible export, or initialization failure.
 A signed-out controller failure may come from the empty token provider.
 
-For a control run, omit `--adam-libs` and install the build in an ARM64 Android
+For a control run, omit `--fairplay-libs` and install the build in an ARM64 Android
 environment. The same probe then uses Apple's native ARM64 library. An error
 that reproduces in both runs may be a harness or SDK setup issue.
 

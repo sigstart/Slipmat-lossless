@@ -118,10 +118,25 @@ impl Artwork {
 
     /// Cache key: stable per template, independent of requested size.
     pub fn cache_key(&self) -> String {
+        // Uploaded tracks' covers are presigned blobstore URLs, re-signed on
+        // every fetch; the query is the signature, not the image. Elsewhere the
+        // query can be the image: every generated playlist cover shares one
+        // path and differs only in its colours and title.
+        let presigned = reqwest::Url::parse(&self.template)
+            .ok()
+            .and_then(|url| {
+                url.host_str()
+                    .map(|host| host.ends_with(".blobstore.apple.com"))
+            })
+            .unwrap_or(false);
+        let image = match self.template.split_once('?') {
+            Some((path, _)) if presigned => path,
+            _ => &self.template,
+        };
         // FNV-1a. Small, dependency-free, and we only need a filename — this is
         // not a security boundary.
         let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-        for byte in self.template.as_bytes() {
+        for byte in image.as_bytes() {
             hash ^= u64::from(*byte);
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
@@ -699,6 +714,36 @@ mod tests {
         );
         assert_ne!(a.cache_key(), b.cache_key());
         assert_eq!(a.cache_key().len(), 16, "usable as a filename");
+    }
+
+    #[test]
+    fn a_resigned_blobstore_url_keeps_its_cache_key() {
+        let blob = "https://store-033.blobstore.apple.com/sq-mq-us-033-000002/47/06/image";
+        assert_eq!(
+            Artwork::new(format!(
+                "{blob}?X-Amz-Date=20261122T071936Z&X-Amz-Signature=aa"
+            ))
+            .cache_key(),
+            Artwork::new(format!(
+                "{blob}?X-Amz-Date=20261123T080000Z&X-Amz-Signature=bb"
+            ))
+            .cache_key()
+        );
+    }
+
+    #[test]
+    fn generated_playlist_covers_keep_their_own_cache_keys() {
+        let generated = |colour: &str, title: &str| {
+            Artwork::new(format!(
+                "https://is1-ssl.mzstatic.com/image/thumb/gen/1200x1200AM.PDCXS11.jpg\
+                 ?c1={colour}&signature=00&t={title}&tc=000000&vkey=1"
+            ))
+            .cache_key()
+        };
+        assert_ne!(
+            generated("FFD9AF", "QWQgSW5maW5pdHVt"),
+            generated("FF853343", "Ly9UT0RP")
+        );
     }
 
     #[test]

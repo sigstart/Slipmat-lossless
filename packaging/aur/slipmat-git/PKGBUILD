@@ -55,9 +55,9 @@ check() {
 }
 
 package_slipmat-daemon-git() {
-  pkgdesc="Slipmat's native playback daemon (latest commit)"
+  pkgdesc="Slipmat's playback daemon (latest commit)"
   depends=('libpulse' 'bubblewrap')
-  optdepends=('libsecret: restore saved native sessions')
+  optdepends=('libsecret: restore saved FairPlay sessions')
   provides=("slipmat-daemon=$pkgver")
   conflicts=('slipmat-daemon')
 

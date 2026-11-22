@@ -1,10 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Miguel Rincon
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use std::{
-    io::{self, Cursor, Read, Write},
-    process::{Command, Stdio},
-};
+use std::io::{self, Cursor, Read};
 
 use slipmat_playback::{AlacDecoder, PcmFormat};
 
@@ -166,22 +163,14 @@ fn rejects_truncated_fragmented_streams() {
     }
 }
 
+/// The provider opens the decoder before the audio output, so input that is
+/// not a fragmented stream must fail here, before anything reaches PulseAudio.
 #[test]
-fn stdin_output_rejects_invalid_input_before_opening_pulse() {
+fn invalid_input_fails_while_opening_the_decoder() {
     for input in [&[][..], b"invalid M4A stream", STEREO_16] {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_fairplay-alac-output"))
-            .arg("/unused/pulse/native")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child.stdin.take().unwrap().write_all(input).unwrap();
-        let output = child.wait_with_output().unwrap();
-        assert_eq!(output.status.code(), Some(1));
-        assert!(output.stdout.is_empty());
-        let error = String::from_utf8_lossy(&output.stderr);
-        assert!(error.contains("reading MP4"), "{error}");
-        assert!(!error.contains("opening PulseAudio output"), "{error}");
+        let Err(error) = AlacDecoder::open_fragmented(Cursor::new(input.to_vec())) else {
+            panic!("opened {} bytes of invalid input", input.len());
+        };
+        assert!(format!("{error:#}").contains("reading MP4"), "{error:#}");
     }
 }

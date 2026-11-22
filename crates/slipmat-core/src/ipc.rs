@@ -28,11 +28,36 @@ use crate::queue::Start;
 /// Where the daemon listens. `$XDG_RUNTIME_DIR` is per-user and cleared on
 /// logout, which is what a socket wants — a stale one in `~` outlives the
 /// process that made it.
-pub fn socket_path() -> Option<std::path::PathBuf> {
-    let dir = std::env::var("XDG_RUNTIME_DIR")
-        .ok()
-        .filter(|d| !d.is_empty())?;
-    Some(std::path::PathBuf::from(dir).join("slipmat.sock"))
+pub fn socket_path() -> std::io::Result<std::path::PathBuf> {
+    Ok(crate::paths::runtime_dir()?.join("slipmat.sock"))
+}
+
+fn connect(path: &std::path::Path) -> std::io::Result<std::os::unix::net::UnixStream> {
+    use std::os::fd::AsRawFd;
+    let stream = std::os::unix::net::UnixStream::connect(path)?;
+    let mut credentials = std::mem::MaybeUninit::<libc::ucred>::uninit();
+    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: The socket and writable credential buffer are valid.
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            credentials.as_mut_ptr().cast(),
+            &mut length,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: The kernel initialized the credentials on success.
+    if unsafe { credentials.assume_init() }.uid != crate::paths::effective_uid() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "daemon peer has the wrong user ID",
+        ));
+    }
+    Ok(stream)
 }
 
 /// Connect to the daemon, starting it if it is not there.
@@ -46,17 +71,15 @@ pub fn socket_path() -> Option<std::path::PathBuf> {
 /// The race is benign: two clients starting at once both spawn, and the second
 /// daemon exits on its own — binding the socket is what settles who owns it.
 pub fn connect_or_spawn(exe: &std::path::Path) -> std::io::Result<std::os::unix::net::UnixStream> {
-    use std::os::unix::net::UnixStream;
-
-    let path = socket_path().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "XDG_RUNTIME_DIR is not set, so there is nowhere to put the socket",
-        )
-    })?;
-
-    if let Ok(stream) = UnixStream::connect(&path) {
-        return Ok(stream);
+    let path = socket_path()?;
+    match connect(&path) {
+        Ok(stream) => return Ok(stream),
+        Err(err)
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ) => {}
+        Err(err) => return Err(err),
     }
 
     tracing::info!(daemon = %exe.display(), "no daemon listening — starting one");
@@ -92,12 +115,18 @@ pub fn connect_or_spawn(exe: &std::path::Path) -> std::io::Result<std::os::unix:
             let _ = child.wait();
         })?;
 
-    // The socket can accept clients before the native account is ready.
+    // The socket can accept clients before the account is ready.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(50));
-        if let Ok(stream) = UnixStream::connect(&path) {
-            return Ok(stream);
+        match connect(&path) {
+            Ok(stream) => return Ok(stream),
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) => {}
+            Err(err) => return Err(err),
         }
     }
     Err(std::io::Error::new(
@@ -141,11 +170,11 @@ pub enum Request {
     #[serde(rename = "subscribe")]
     Subscribe,
 
-    /// Prompt the requesting client for native Apple Music sign-in.
+    /// Prompt the requesting client for Apple Music sign-in.
     #[serde(rename = "signIn")]
     SignIn,
 
-    /// End the native session and forget the saved profile.
+    /// End the session and forget the saved profile.
     #[serde(rename = "signOut")]
     SignOut,
 
@@ -400,13 +429,12 @@ pub enum Transport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event")]
 pub enum Event {
-    /// Whether the selected queue item is waiting for native authentication.
-    #[serde(rename = "nativeSignIn")]
-    NativeSignIn { required: bool },
+    /// Whether the selected queue item is waiting for authentication.
+    #[serde(rename = "signInRequired")]
+    SignInRequired { required: bool },
 
     #[serde(rename = "playbackCapabilities")]
     PlaybackCapabilities {
-        native: bool,
         seek: bool,
         shuffle: bool,
         repeat: bool,
@@ -609,16 +637,5 @@ mod tests {
         // read as something else — which is what an untagged enum would do.
         let bad = serde_json::from_str::<Request>(r#"{"req":"teleport"}"#);
         assert!(bad.is_err());
-    }
-
-    #[test]
-    fn the_socket_lives_under_the_runtime_dir() {
-        // Not `~`: a socket that outlives the session is a socket that answers
-        // for a daemon which is not running.
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", "/run/user/1000") };
-        assert_eq!(
-            socket_path().unwrap(),
-            std::path::PathBuf::from("/run/user/1000/slipmat.sock")
-        );
     }
 }

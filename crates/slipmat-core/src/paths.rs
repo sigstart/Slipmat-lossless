@@ -7,6 +7,8 @@
 //! frontend and the daemon have to agree on these paths, and a GTK dependency
 //! for two `std::env::var` calls would put the engine behind a display server.
 
+use std::io;
+use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 
 fn xdg(var: &str, fallback: &str) -> Option<PathBuf> {
@@ -30,6 +32,34 @@ pub fn artwork_dir() -> Option<PathBuf> {
 /// `$XDG_STATE_HOME/slipmat`, else `~/.local/state/slipmat`.
 pub fn state_dir() -> Option<PathBuf> {
     Some(xdg("XDG_STATE_HOME", ".local/state")?.join("slipmat"))
+}
+
+/// `$XDG_RUNTIME_DIR`, refused unless it is a private directory of ours,
+/// because the daemon's sockets and the provider's profile live there.
+pub fn runtime_dir() -> io::Result<PathBuf> {
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "XDG_RUNTIME_DIR is not set"))?;
+    if !dir.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "XDG_RUNTIME_DIR must be absolute",
+        ));
+    }
+    let metadata = std::fs::symlink_metadata(&dir)?;
+    if !metadata.is_dir() || metadata.uid() != effective_uid() || metadata.mode() & 0o777 != 0o700 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "XDG_RUNTIME_DIR must be a private directory owned by the effective user",
+        ));
+    }
+    Ok(dir)
+}
+
+pub fn effective_uid() -> u32 {
+    // SAFETY: geteuid takes no arguments and has no failure mode.
+    unsafe { libc::geteuid() }
 }
 
 #[cfg(test)]

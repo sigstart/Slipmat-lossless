@@ -74,7 +74,7 @@ def stage_playback_sample(sample, output, developer_token):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("sdk", type=Path, help="extracted Android MusicKit SDK")
-    parser.add_argument("--adam-libs", type=Path, help="x86-64 libraries; omit for the ARM64 control")
+    parser.add_argument("--fairplay-libs", type=Path, help="x86-64 libraries; omit for the ARM64 control")
     parser.add_argument("--playback", action="store_true", help="stage Apple's complete test player")
     parser.add_argument("--developer-token-file", type=Path, help="local file containing a MusicKit developer token")
     args = parser.parse_args()
@@ -84,7 +84,7 @@ def main():
         for name in SDK_ARCHIVES:
             if not (args.sdk / name).is_file():
                 raise ValueError(f"missing SDK archive: {args.sdk / name}")
-        libraries = native_libraries(args.adam_libs) if args.adam_libs else {}
+        libraries = native_libraries(args.fairplay_libs) if args.fairplay_libs else {}
         developer_token = ""
         if args.developer_token_file:
             developer_token = args.developer_token_file.read_text(encoding="utf-8").strip()
@@ -109,7 +109,7 @@ def main():
     for name in SDK_ARCHIVES:
         shutil.copyfile(args.sdk / name, aar_directory / name)
 
-    abi = "x86_64" if args.adam_libs else "arm64-v8a"
+    abi = "x86_64" if args.fairplay_libs else "arm64-v8a"
     (output / "gradle.properties").write_text(
         f"probeAbi={abi}\nandroid.useAndroidX=true\n", encoding="utf-8"
     )

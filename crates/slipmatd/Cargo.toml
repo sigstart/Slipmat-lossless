@@ -1,14 +1,19 @@
 [package]
 name = "slipmatd"
-description = "The Slipmat daemon: native playback and Apple Music services"
+description = "The Slipmat daemon: playback and Apple Music services"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# The saved provider session, sealed with a key from Secret Service — see profile_store.rs.
+aes-gcm = "0.10"
+base64 = "0.22"
+zeroize = "1"
 # Volume lives on the audio server's stream, not inside MusicKit — see mixer.rs.
 libpulse-binding = { version = "2", default-features = false }
 libc = "0.2"
+fairplay-wire = { path = "../fairplay-wire" }
 slipmat-core = { path = "../slipmat-core" }
 
 anyhow.workspace = true

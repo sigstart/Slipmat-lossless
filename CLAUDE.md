@@ -14,15 +14,15 @@ mechanism and the music, and lets the record turn on its own terms.
 **Why this project exists.** Apple ships no Linux client. Slipmat draws the
 interface natively and plays licensed ALAC through Apple's Android FairPlay
 libraries. GTK and CLImat share the same playback and account session in
-`slipmatd`. See the [FairPlay spec](docs/specs/SPEC-fairplay-phase-1.md) for the
-migration record.
+`slipmatd`. See the [FairPlay provider spec](docs/specs/SPEC-fairplay-provider.md)
+for the Rust provider and the phase 1 record in its history.
 
 ### Engine and clients
 
 The engine and the interface are separate concerns, and the interface is no
 longer only GTK:
 
-- **The native provider** owns the authorized session and audio output.
+- **The FairPlay provider** owns the authorized session and audio output.
   The shared daemon owns the queue and advances it on playback completion.
 - **The GTK client** targets GNOME and should be indistinguishable from a
   first-party GNOME application. That is a rule *about this client*, not about
@@ -76,10 +76,10 @@ the state belongs in a model and the change belongs in an `update()`.
 ### 1. Licensed playback
 
 Playback requires an active Apple Music subscription and valid licences.
-Slipmat may use Apple's Android playback libraries through a native
-compatibility layer. The playback backend can decode and buffer audio in memory
-for immediate output. GTK, CLImat, and other clients exchange playback commands,
-metadata, and status with the backend.
+Slipmat may use Apple's Android playback libraries through libhybris, a
+compatibility layer for Android code. The playback backend can decode and
+buffer audio in memory for immediate output. GTK, CLImat, and other clients
+exchange playback commands, metadata, and status with the backend.
 
 Preserve normal account authentication, subscription checks, and DRM licence
 enforcement. Keep content keys private to the DRM component. Keep decrypted
@@ -105,15 +105,15 @@ The sidecar can die, the network can drop, Apple can 403 a stale token. Every
 failure becomes an `adw::Toast` or a state, never a crash. `anyhow::Result`
 internally.
 
-### 6. Supervise the native provider
+### 6. Supervise the FairPlay provider
 
 Keep the daemon responsive when the provider stops and let users sign in again.
 
 ### 7. Keep credentials private
 
 Session credentials travel over the provider's private pipe and stay in daemon
-memory. Keep them out of client events, logs, and error text. The native profile
-helper encrypts saved session data using a key held by Secret Service.
+memory. Keep them out of client events, logs, and error text. The daemon's
+profile store encrypts saved session data using a key held by Secret Service.
 
 ### 8. Never block the GTK main thread
 
@@ -167,7 +167,7 @@ Rule 10 removes the crutch; this is why it is not missed.
 ## Current architecture
 
 GTK and CLImat use a Unix socket to browse and control playback. The daemon
-handles Apple Music API requests, queue state, and MPRIS. It starts the native
+handles Apple Music API requests, queue state, and MPRIS. It starts the FairPlay
 provider over private pipes. The provider uses the authorized Apple Music
 session for licensed playback and returns catalogue credentials to the daemon.
 
@@ -255,24 +255,30 @@ Library membership is the same shape of fact: a track that came from
 `/me/library/…` is in the library by definition, so `Track::in_library` is set
 by the client method that fetched it — never guessed from the id.
 
-**Apple sends artwork for its own playlists and not for yours.** Measured
-against a real library, and the split is the whole finding rather than the
-count:
+**Apple now draws a cover for most playlists you made.** Measured on
+2026-11-22 against a real library of 64 playlists:
 
-| `with_art` | `without_art` |
-| --- | --- |
-| Edgerunners Soundtrack | Game on |
-| Favorite Songs | My Shazam Tracks |
-| Forza Horizon 4 Soundtrack | Red Soundtrack |
-| Vos Veis | Shazams |
+| Artwork | Count | What it is |
+| --- | --- | --- |
+| Generated | 28 | `…/image/thumb/gen/1200x1200AM.PDCXS11.jpg?c1=…&t=…` |
+| Uploaded | 6 | a picture you set, as a presigned `*.blobstore.apple.com` URL |
+| Curated | 16 | Apple's and editorial playlists, as an ordinary template |
+| None | 14 | still nothing, on both endpoints |
 
-Curated and Apple-generated playlists carry an `artwork` object; **every
-user-created one carries none**, on both endpoints — the list *and*
-`/me/library/playlists/{id}`. So the 2×2 mosaic of four covers that
-`music.apple.com` shows for a playlist you never gave a picture to is drawn by
-the web player, not fetched. `include=catalog` cannot rescue it either, the way
-it rescues a library artist's portrait: a playlist you made has no catalog twin
-to borrow from.
+Until recently **every user-created playlist carried none**, on both the list
+*and* `/me/library/playlists/{id}`, so this changed under unchanged code. A
+generated cover is Apple's own gradient with the name printed on it: the colours
+are `c1`–`c4`, the name is base64 in `t`, and the text colour is `tc`. **Every
+generated cover has the same path**, so the query is the image. That is the
+opposite of an uploaded cover, whose query is a signature that changes on every
+fetch. `Artwork::cache_key` drops the query for blobstore URLs only; dropping it
+everywhere once gave all 28 generated tiles one cache file, and they all showed
+whichever playlist was fetched last.
+
+For the playlists that still have none, the 2×2 mosaic of four covers that
+`music.apple.com` shows is drawn by the web player, not fetched.
+`include=catalog` cannot rescue it either, the way it rescues a library
+artist's portrait: a playlist you made has no catalog twin to borrow from.
 
 `all_library_playlists` logs both lists on every load, **named rather than
 counted**, because a bare count answered the wrong question — it described the
@@ -283,10 +289,11 @@ Two traps here, both of which cost a round:
 
 - **A screenshot in `docs/screenshots/playlist.webp` shows Slipmat rendering
   that mosaic for "Game on" in 0.2.0.** So Apple returned it at least once and
-  no longer does, on identical code — `git diff v0.2.0..` over `client.rs`,
-  `types.rs` and `pages.rs` is the rename and nothing else. Treat playlist
-  artwork as *inconsistent between accounts and over time*, and never conclude
-  from one absence that a thing was never there.
+  no longer did, on identical code — `git diff v0.2.0..` over `client.rs`,
+  `types.rs` and `pages.rs` is the rename and nothing else — and has since
+  started sending generated covers instead. Treat playlist artwork as
+  *inconsistent between accounts and over time*, and never conclude from one
+  absence that a thing was never there.
 - **Three separate silent exits** hid this: `fetch` and `decode` were `.ok()`
   and `and_then`, and `fetch_page_art` returned early on `None` artwork saying
   nothing. A page holding its placeholder therefore looked identical whether
@@ -296,7 +303,8 @@ Two traps here, both of which cost a round:
 Drawing the mosaic ourselves means a compositor: take the first four tracks'
 covers, tile them, cache under the playlist's own key. On a detail page the
 tracks are already loaded and it costs nothing extra; in the grid it costs one
-request per artless playlist, because a tile knows no tracks.
+request per artless playlist, because a tile knows no tracks. With most of your
+playlists now generated, it would cover the 14 that are left.
 
 ### Restoring the last session
 
@@ -759,7 +767,7 @@ ordinary traffic.
 ## Commands
 
 ```bash
-sh scripts/fairplay-trial/prepare.sh  # build and register the native provider
+sh scripts/fairplay/prepare.sh  # fetch and verify the FairPlay libraries
 cargo build --locked --workspace
 target/debug/slipmat
 target/debug/climat

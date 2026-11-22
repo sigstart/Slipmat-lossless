@@ -2,6 +2,45 @@
 /vendor/fairplay/x86_64/rootfs/
 /vendor/fairplay/x86_64/compat/
 
+# ── DRM client (FairPlay provider) build artifacts ───────────────────────────────
+# Built from drm/ via make; not source.
+vendor/adam/drm/libdrm_client.so
+vendor/adam/drm/tests/test_fairplay
+vendor/adam/drm/tests/test_device
+vendor/adam/drm/tests/test_fp_exchange
+vendor/adam/drm/tests/test_live_exchange
+vendor/adam/drm/*.o
+
+# ── DRM / Android container runtime state ─────────────────────────────────────
+# These files are written by the running DRM process and must not be committed.
+vendor/adam/drm/rootfs/data/data/com.apple.android.music/files/MUSIC_TOKEN
+vendor/adam/drm/rootfs/data/data/com.apple.android.music/files/STOREFRONT_ID
+vendor/adam/drm/rootfs/data/data/com.apple.android.music/files/adi.pb
+vendor/adam/drm/rootfs/data/data/com.apple.android.music/files/fsi.pdat
+vendor/adam/drm/rootfs/data/data/com.apple.android.music/files/IC-Info.sids
+vendor/adam/drm/rootfs/data/data/com.apple.android.music/files/engine-session.lock
+vendor/adam/drm/rootfs/data/data/com.apple.android.music/files/mpl_db/
+vendor/adam/drm/rootfs/data/data/com.apple.android.music/files/drm-state
+vendor/adam/drm/rootfs/data/data/com.apple.android.music/files/531EA4BB8D4B206263577F83ADB3948181F99DA3
+vendor/adam/drm/rootfs/data/data/com.apple.android.music/files/687AFDAA1CFB2E9F37DD7FD5EE63A93FCAC1AFAA
+vendor/adam/drm/rootfs/home/
+vendor/adam/drm/rootfs/tmp/
+# Built by `make -C drm android-stubs` from drm/stubs/ (packaged as resources/android-stubs).
+vendor/adam/drm/stubs/out/
+
+# ── DRM client credentials (FairPlay provider) ───────────────────────────────────
+# These files are written by the running DRM client and must not be committed.
+vendor/adam/drm/files/MUSIC_TOKEN
+vendor/adam/drm/files/STOREFRONT_ID
+vendor/adam/drm/files/adi.pb
+vendor/adam/drm/files/fsi.pdat
+vendor/adam/drm/files/IC-Info.sids
+vendor/adam/drm/files/engine-session.lock
+vendor/adam/drm/files/mpl_db/
+vendor/adam/drm/files/drm-state
+vendor/adam/drm/files/531EA4BB8D4B206263577F83ADB3948181F99DA3
+vendor/adam/drm/files/687AFDAA1CFB2E9F37DD7FD5EE63A93FCAC1AFAA
+
 # makepkg build output. The PKGBUILDs are source; everything makepkg creates
 # beside them is not — including the ~330 MB it downloads.
 /packaging/aur/*/src/
@@ -24,6 +63,8 @@ packaging/flatpak/.flatpak-cargo-generator.py
 # the app once, which un-ignored the 94 MB artefact it had been protecting and
 # a `git add -A` committed it on the spot.
 *.flatpak
+
+
 
 CLAUDE.local.md
 .codex

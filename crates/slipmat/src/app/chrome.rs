@@ -309,6 +309,35 @@ impl AppModel {
                  It needs an active Apple Music subscription.",
             )
             .build();
+        let theme = gtk::IconTheme::for_display(&gtk::prelude::WidgetExt::display(parent));
+        if !theme.has_icon(crate::APP_ID) {
+            const ICON: &[u8] = include_bytes!(
+                "../../../../data/icons/hicolor/scalable/apps/dev.miguelrincon.Slipmat.svg"
+            );
+            let icon = gtk::gdk_pixbuf::PixbufLoader::with_type("svg").and_then(|loader| {
+                loader.set_size(128, 128);
+                loader.write(ICON)?;
+                loader.close()?;
+                Ok(loader.pixbuf().map(|pixbuf| {
+                    let format = if pixbuf.has_alpha() {
+                        gtk::gdk::MemoryFormat::R8g8b8a8
+                    } else {
+                        gtk::gdk::MemoryFormat::R8g8b8
+                    };
+                    gtk::gdk::MemoryTexture::new(
+                        pixbuf.width(),
+                        pixbuf.height(),
+                        format,
+                        &pixbuf.read_pixel_bytes(),
+                        pixbuf.rowstride() as usize,
+                    )
+                }))
+            });
+            match icon {
+                Ok(Some(icon)) => page.set_paintable(Some(&icon)),
+                _ => page.set_icon_name(Some("audio-x-generic-symbolic")),
+            }
+        }
 
         let button = gtk::Button::builder()
             .label("Sign In to Apple Music")
@@ -320,9 +349,6 @@ impl AppModel {
             button.connect_clicked(move |_| sender.input(AppMsg::SignIn));
         }
 
-        // Said before the button is pressed, not after. A browser window
-        // opening out of a native app is alarming when it is a surprise, and
-        // this is the one moment Slipmat cannot hide the web engine.
         let note = gtk::Label::builder()
             .label(
                 "Sign in to your Apple Account from this app. Have your verification \
@@ -341,10 +367,6 @@ impl AppModel {
             .build();
         column.append(&button);
         column.append(&note);
-        column.append(&super::native_auth::onboarding_button(
-            &self.native_auth_action,
-            sender,
-        ));
         page.set_child(Some(&column));
 
         // A way out of the app, on the one screen that otherwise has none:

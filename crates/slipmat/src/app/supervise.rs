@@ -116,20 +116,18 @@ impl AppModel {
         root: &adw::ApplicationWindow,
     ) {
         match event {
-            Event::NativeSignIn { required } => {
-                self.native_auth_needed_for_play = required;
+            Event::SignInRequired { required } => {
+                self.sign_in_needed_for_play = required;
                 if required {
-                    self.native_auth_action.set_enabled(true);
-                    self.open_native_auth(sender, root);
+                    self.sign_in_action.set_enabled(true);
+                    self.open_sign_in(sender, root);
                 }
             }
             Event::PlaybackCapabilities {
-                native,
                 seek,
                 shuffle,
                 repeat,
             } => {
-                self.native_playback = native;
                 self.playback_capabilities = PlaybackCapabilities {
                     seek,
                     shuffle,
@@ -166,6 +164,7 @@ impl AppModel {
             }
             Event::Stage(stage) => {
                 let clear = clears_account_state(&stage);
+                let was_ready = matches!(self.stage, Stage::Ready);
                 self.mirror.stage = Some(stage.clone());
                 self.stage = match stage {
                     DaemonStage::Connecting => Stage::Connecting,
@@ -175,8 +174,11 @@ impl AppModel {
                     DaemonStage::Broken { detail } => Stage::Broken(detail),
                 };
                 if clear {
-                    self.forget_session(sender);
+                    self.forget_session();
                 } else if matches!(self.stage, Stage::Ready) {
+                    if !was_ready {
+                        self.reload_from_cache(sender);
+                    }
                     self.resume_navigation(sender);
                 }
             }

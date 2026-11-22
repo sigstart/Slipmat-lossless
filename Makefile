@@ -15,7 +15,7 @@ CLIMAT   = dev.miguelrincon.Climat
 ICON_SIZES = 16 32 48 64 128 256 512
 
 .PHONY: all build run test check gapless footprint install \
-        dev-install uninstall clean flatpak flatpak-bundle aur aur-publish
+        dev-install fairplay-libs fairplay-provider uninstall clean flatpak flatpak-bundle aur aur-publish
 all: build
 
 build:
@@ -86,7 +86,13 @@ aur:
 aur-publish:
 	./scripts/aur-publish.sh slipmat-git --push
 
-install: build dev-install
+fairplay-libs:
+	sh scripts/fairplay/prepare.sh
+
+fairplay-provider: fairplay-libs
+	sh scripts/fairplay/build-provider.sh
+
+install: fairplay-libs build dev-install
 	install -Dm755 target/release/slipmat $(BINDIR)/slipmat
 	install -Dm755 target/release/slipmatd $(BINDIR)/slipmatd
 	install -Dm755 target/release/climat $(BINDIR)/climat

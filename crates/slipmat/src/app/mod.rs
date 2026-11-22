@@ -72,7 +72,6 @@ use slipmat_core::player::protocol::RepeatMode;
 mod background;
 mod chrome;
 mod library;
-mod native_auth;
 pub(crate) mod navigation;
 mod osd;
 mod pages;
@@ -80,6 +79,7 @@ mod pins;
 mod playback;
 mod queue;
 mod row_menu;
+mod sign_in;
 mod status;
 mod supervise;
 mod view;
@@ -126,14 +126,13 @@ pub enum Stage {
 pub struct AppModel {
     stage: Stage,
     mirror: Mirror,
-    native_playback: bool,
     playback_capabilities: PlaybackCapabilities,
     /// The first-run gate, while it is up. `Some` exactly when the app is
     /// blocked, which is what stops it being presented twice.
     onboarding: Option<adw::Dialog>,
-    native_auth_action: gtk::gio::SimpleAction,
-    native_auth_dialog: Option<Controller<native_auth::AuthDialog>>,
-    native_auth_needed_for_play: bool,
+    sign_in_action: gtk::gio::SimpleAction,
+    sign_in_dialog: Option<Controller<sign_in::AuthDialog>>,
+    sign_in_needed_for_play: bool,
 
     /// The last track MusicKit reported, kept so the bar can hold it through a
     /// queue reload — see `push_snapshot::showing`.
@@ -221,7 +220,7 @@ pub struct AppModel {
     /// A pinned row's label, by playlist id.
     ///
     /// Kept so a name can be filled in *after* the row is drawn. The sidebar is
-    /// built before `seed_from_cache` runs, so at build time no pin has a name
+    /// built before the library loads, so at build time no pin has a name
     /// yet — and rebuilding the rows to fix that would clear the selection,
     /// which is the bug 285b542 removed. Writing the label leaves it alone.
     pin_labels: Vec<(String, gtk::Label)>,
@@ -424,8 +423,8 @@ impl LibraryAction {
 pub enum AppMsg {
     Quit,
     SignIn,
-    OpenNativeAuth,
-    NativeAuthClosed {
+    OpenSignIn,
+    SignInClosed {
         signed_in: bool,
     },
     /// Asks first — see `confirm_sign_out`.
@@ -604,7 +603,7 @@ pub enum CommandMsg {
     QuitWritten,
     /// Everything the daemon pushed down, including losing it.
     Daemon(daemon::Incoming),
-    NativeAuthAvailable(bool),
+    SignInAvailable(bool),
     /// Cover art is on disk. `None` when the fetch failed — a missing cover is
     /// cosmetic and must not become a toast.
     Artwork {
@@ -1439,12 +1438,11 @@ impl Component for AppModel {
             last_queue: None,
             pending_start: None,
             mirror: Mirror::default(),
-            native_playback: false,
             playback_capabilities: PlaybackCapabilities::default(),
             onboarding: None,
-            native_auth_action: native_auth::register_action(&root, &sender),
-            native_auth_dialog: None,
-            native_auth_needed_for_play: false,
+            sign_in_action: sign_in::register_action(&root, &sender),
+            sign_in_dialog: None,
+            sign_in_needed_for_play: false,
             last_item: None,
             menu_sender: sender.clone(),
             daemon: None,
@@ -1489,7 +1487,7 @@ impl Component for AppModel {
             // furniture, and it should not sit next to About.
             let account = gtk::gio::Menu::new();
             account.append(Some("Sign Out of _Library"), Some("win.sign-out"));
-            native_auth::append_menu_item(&account);
+            sign_in::append_menu_item(&account);
             primary_menu.append_section(None, &account);
 
             // Quit was missing from this menu entirely, while the shortcuts
@@ -1530,16 +1528,8 @@ impl Component for AppModel {
         // Rows read playability from here, so seed it before any are built.
         *model.dead_rows.borrow_mut() = model.dead_ids.clone();
 
-        // Open on last time's library rather than on a spinner. The refresh
-        // still runs the moment the sidecar is up; it lands quietly, or — far
-        // more often — finds nothing changed and does not even rebuild.
-        model.seed_from_cache();
-        // The rows exist by now but were drawn before the cache was read, so
-        // every pin still says "Unavailable".
-        model.refresh_pin_names();
-
         connect(&sender);
-        native_auth::watch_availability(&sender);
+        sign_in::watch_availability(&sender);
 
         ComponentParts { model, widgets }
     }
@@ -1675,8 +1665,7 @@ struct Animated {
 
 impl AppModel {
     fn show_now_playing(&self) -> bool {
-        matches!(self.stage, Stage::Ready)
-            || (self.native_playback && !self.mirror.queue.is_empty())
+        matches!(self.stage, Stage::Ready) || !self.mirror.queue.is_empty()
     }
 
     fn animated_state(&self) -> Animated {
@@ -1749,10 +1738,10 @@ impl AppModel {
                 }
             }
             AppMsg::SignIn => self.ask(Request::SignIn),
-            AppMsg::OpenNativeAuth => self.open_native_auth(&sender, root),
-            AppMsg::NativeAuthClosed { signed_in } => {
-                self.native_auth_dialog = None;
-                if std::mem::take(&mut self.native_auth_needed_for_play) && !signed_in {
+            AppMsg::OpenSignIn => self.open_sign_in(&sender, root),
+            AppMsg::SignInClosed { signed_in } => {
+                self.sign_in_dialog = None;
+                if std::mem::take(&mut self.sign_in_needed_for_play) && !signed_in {
                     self.transport(Transport::Pause);
                 }
             }
@@ -2200,14 +2189,6 @@ impl AppModel {
             AppMsg::JumpTo { at, id } => match self.queue_index_at(at, &id) {
                 Some(index) => {
                     self.ask(Request::JumpTo { index });
-                    // Clicking a track in the queue is a request to *play* it.
-                    // `changeToMediaAtIndex` only moves the cursor, so on a
-                    // queue that is loaded but idle — a restored session, or a
-                    // paused one — it moved silently and looked like nothing
-                    // had happened.
-                    if !self.native_playback && !self.mirror.is_playing() {
-                        self.transport(Transport::Play);
-                    }
                 }
                 None => self.toast("That track is no longer in the queue"),
             },
@@ -2322,8 +2303,8 @@ impl AppModel {
         let sender = sender.clone();
         match msg {
             CommandMsg::QuitWritten => notify::quit_cleanly(),
-            CommandMsg::NativeAuthAvailable(available) => {
-                self.native_auth_action.set_enabled(available);
+            CommandMsg::SignInAvailable(available) => {
+                self.sign_in_action.set_enabled(available);
             }
             CommandMsg::Pruned(report) => {
                 // Reported here rather than inside the sweep, so the sweep
@@ -2472,10 +2453,7 @@ impl AppModel {
     /// after a sign-out would show one person's music to whoever signs in
     /// next. The unplayable-id cache stays — it is about Apple's catalog, not
     /// about the user.
-    fn forget_session(&mut self, sender: &ComponentSender<Self>) {
-        if !self.native_playback {
-            self.mirror.clear_account_state();
-        }
+    fn forget_session(&mut self) {
         self.all_tracks.clear();
         self.albums.clear();
         self.artists.clear();
@@ -2513,22 +2491,6 @@ impl AppModel {
         self.rebuild_playlists();
 
         self.pop_to_results();
-        if self.native_playback {
-            return;
-        }
-        self.show_queue = false;
-        self.last_item = None;
-        self.last_queue = None;
-        self.pending_start = None;
-        self.art_path = None;
-        self.art_for = None;
-        self.notified_for = None;
-        self.notify_when_art_lands = None;
-        self.sync_tick(sender);
-        self.now_playing.emit(NowPlayingInput::ArtworkReady(None));
-        self.player_view.emit(PlayerViewInput::Artwork(None));
-        crate::style::set_backdrop(None);
-        self.push_snapshot();
     }
 
     /// Put the first-run gate up or take it down, to match the session.
@@ -2539,7 +2501,7 @@ impl AppModel {
     /// been easy to forget.
     fn sync_onboarding(&mut self, sender: &ComponentSender<Self>, root: &adw::ApplicationWindow) {
         match (matches!(self.stage, Stage::SignedOut), &self.onboarding) {
-            (true, None) if self.native_auth_dialog.is_none() => {
+            (true, None) if self.sign_in_dialog.is_none() => {
                 self.onboarding = Some(self.present_onboarding(sender, root));
             }
             (false, Some(dialog)) => {
@@ -2560,15 +2522,6 @@ impl AppModel {
 mod tests {
     use super::*;
     use slipmat_core::music::types::TrackId;
-
-    #[test]
-    fn startup_reads_the_library_cache_once() {
-        let source = include_str!("mod.rs");
-        let seed = concat!("model.", "seed_from_cache();");
-        let reload = concat!("model.", "reload_from_cache(&sender);");
-        assert_eq!(source.matches(seed).count(), 1);
-        assert!(!source.contains(reload));
-    }
 
     fn track(title: &str, catalog: Option<&str>) -> Track {
         Track {

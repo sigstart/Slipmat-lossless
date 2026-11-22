@@ -103,8 +103,7 @@ impl Default for PlaybackCapabilities {
 struct App {
     snap: Snapshot,
     stage: Stage,
-    native_sign_in_required: bool,
-    native_playback: bool,
+    sign_in_required: bool,
     capabilities: PlaybackCapabilities,
     browser: browser::Browser,
     startup_navigation: Option<Navigation>,
@@ -126,8 +125,7 @@ impl Default for App {
         Self {
             snap: Snapshot::default(),
             stage: Stage::default(),
-            native_sign_in_required: false,
-            native_playback: false,
+            sign_in_required: false,
             capabilities: PlaybackCapabilities::default(),
             browser: browser::Browser::default(),
             startup_navigation: None,
@@ -218,7 +216,7 @@ async fn run() -> Result<()> {
                             .as_ref()
                             .map(|n| (n.text.as_str(), n.bad))
                             .or_else(|| {
-                                app.native_sign_in_required
+                                app.sign_in_required
                                     .then_some(("Run climat sign-in", false))
                             })
                             .or_else(|| {
@@ -887,27 +885,16 @@ impl App {
         self.browser.clear_account_state();
         self.message = None;
         self.refreshing_library = false;
-        if !self.native_playback {
-            self.snap = Snapshot {
-                volume: self.snap.volume,
-                ..Default::default()
-            };
-            self.queue = queue::Queue::default();
-            self.pane = Pane::Browser;
-            self.bars = [0.0; spectrum::BANDS];
-        }
     }
 
     fn on_event(&mut self, event: Event, link: &link::Link) {
         match event {
-            Event::NativeSignIn { required } => self.native_sign_in_required = required,
+            Event::SignInRequired { required } => self.sign_in_required = required,
             Event::PlaybackCapabilities {
-                native,
                 seek,
                 shuffle,
                 repeat,
             } => {
-                self.native_playback = native;
                 self.capabilities = PlaybackCapabilities {
                     seek,
                     shuffle,
@@ -1131,7 +1118,6 @@ mod tests {
         }
         app.on_event(
             Event::PlaybackCapabilities {
-                native: true,
                 seek: false,
                 shuffle: false,
                 repeat: false,
@@ -1155,15 +1141,15 @@ mod tests {
     }
 
     #[test]
-    fn native_sign_in_notice_survives_library_stage_updates() {
+    fn sign_in_notice_survives_library_stage_updates() {
         let (link, _) = link::Link::channel();
         let mut app = App::default();
-        app.on_event(Event::NativeSignIn { required: true }, &link);
+        app.on_event(Event::SignInRequired { required: true }, &link);
         app.on_event(Event::Stage(Stage::SignedOut), &link);
         app.on_event(Event::Stage(Stage::Ready), &link);
-        assert!(app.native_sign_in_required);
-        app.on_event(Event::NativeSignIn { required: false }, &link);
-        assert!(!app.native_sign_in_required);
+        assert!(app.sign_in_required);
+        app.on_event(Event::SignInRequired { required: false }, &link);
+        assert!(!app.sign_in_required);
     }
 
     #[test]
@@ -1191,44 +1177,22 @@ mod tests {
     }
 
     #[test]
-    fn signed_out_clears_transient_player_state_and_keeps_choices() {
+    /// The queue and snapshot are not cleared here: the daemon empties them on
+    /// sign-out and publishes the result like any other change.
+    fn signed_out_clears_account_state_and_keeps_choices() {
         let (link, _) = link::Link::channel();
-        let mut app = App {
-            snap: Snapshot {
-                track_id: Some("old".into()),
-                title: "Old song".into(),
-                volume: 0.75,
-                playing: true,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+        let mut app = App::default();
         app.browser.view = LibraryView::Albums;
         app.browser.kinds = slipmat_core::ipc::CatalogFilter::Artists;
         app.browser.sorts[1] = (slipmat_core::sort::SortBy::Year, true);
         app.browser.showing = Showing::Catalog { searching: true };
         *app.browser.filter_mut() = "old search".into();
-        app.queue.replace(
-            vec![slipmat_core::ipc::QueueItem {
-                title: "Old song".into(),
-                ..Default::default()
-            }],
-            0,
-        );
-        app.pane = Pane::Queue;
         app.message = Some(Notice::bad("old error"));
-        app.bars = [1.0; spectrum::BANDS];
 
         app.on_event(Event::Stage(Stage::SignedOut), &link);
 
         assert_eq!(app.stage, Stage::SignedOut);
-        assert!(app.snap.track_id.is_none());
-        assert!(app.snap.title.is_empty());
-        assert_eq!(app.snap.volume, 0.75);
-        assert!(app.queue.items.is_empty());
-        assert!(matches!(app.pane, Pane::Browser));
         assert!(app.message.is_none());
-        assert_eq!(app.bars, [0.0; spectrum::BANDS]);
         assert_eq!(app.browser.view, LibraryView::Albums);
         assert_eq!(app.browser.kinds, slipmat_core::ipc::CatalogFilter::Artists);
         assert_eq!(

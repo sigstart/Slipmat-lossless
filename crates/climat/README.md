@@ -50,13 +50,8 @@ When CLImat shows `Run climat sign-in`, run that command from a second terminal.
 The queue starts the selected track after sign-in. Your Apple Account email and
 verification code are visible as you type. The password stays hidden. Press `Ctrl+C` to cancel.
 
-`climat sign-in-status` reports whether a native Apple Music session is active,
+`climat sign-in-status` reports whether an Apple Music session is active,
 and `climat sign-out` ends the session. Run `climat` to open the player UI.
-
-With a native session active, `climat native-play <catalog-song-id>` runs the
-single-track playback trial. Use a decimal catalogue song ID. The command waits
-for playback to finish and prints the reported audio format. Press `Ctrl+C` to
-cancel playback.
 
 ## The bars
 
