@@ -39,6 +39,9 @@ const LIBRARY_PAGE: usize = 100;
 /// How many library pages to fetch at once. The pages are independent, so
 /// fetching them serially spent most of the load waiting on round trips.
 const LIBRARY_CONCURRENCY: usize = 6;
+/// Retries for a GET that met a 5xx, waiting this pause times the attempt.
+const GET_RETRIES: u32 = 2;
+const GET_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Clone is cheap: `reqwest::Client` is an `Arc` internally, and the tokens are
 /// small strings. Cloning per concurrent page keeps the connection pool shared.
@@ -99,6 +102,25 @@ impl Client {
 
     fn get(&self, path: &str) -> reqwest::RequestBuilder {
         self.authorize(self.http.get(format!("{API_BASE}{path}")))
+    }
+
+    /// A GET, retried on a 5xx: Apple's API throws the odd 500 in normal use,
+    /// and one page failing takes a whole concurrent library load with it.
+    /// Writes are not retried — a 202 cannot say whether the first one landed.
+    async fn fetch(&self, path: &str) -> reqwest::Result<reqwest::Response> {
+        let mut retries = 0;
+        loop {
+            let response = self.get(path).send().await?;
+            let status = response.status();
+            if !status.is_server_error() || retries == GET_RETRIES {
+                return Ok(response);
+            }
+            retries += 1;
+            // The query can hold a search term, so only the path is logged.
+            let endpoint = path.split('?').next().unwrap_or_default();
+            tracing::debug!(%status, endpoint, retries, "apple music api retry");
+            tokio::time::sleep(GET_RETRY_PAUSE * retries).await;
+        }
     }
 
     fn post(&self, path: &str) -> reqwest::RequestBuilder {
@@ -338,8 +360,7 @@ impl Client {
     /// path and owns the `library` flag, which is the rule everywhere else too.
     async fn playlist_details(&self, path: &str) -> Result<Playlist> {
         let res = self
-            .get(path)
-            .send()
+            .fetch(path)
             .await
             .map_err(Self::transport_error)
             .context("requesting playlist")?;
@@ -465,10 +486,9 @@ impl Client {
         T: From<R>,
     {
         let res = self
-            .get(&format!(
+            .fetch(&format!(
                 "{base}/{kind}?limit={LIBRARY_PAGE}&offset={offset}{extra_query}"
             ))
-            .send()
             .await
             .map_err(Self::transport_error)
             .with_context(|| format!("requesting {kind}"))?;
@@ -521,11 +541,10 @@ impl Client {
     ) -> Result<SearchResults> {
         let query = urlencode(term);
         let res = self
-            .get(&format!(
+            .fetch(&format!(
                 "/catalog/{}/search?types={types}&limit={limit}&offset={offset}&term={query}",
                 self.storefront
             ))
-            .send()
             .await
             .map_err(|err| {
                 if err.is_connect() {
@@ -615,11 +634,10 @@ impl Client {
         for chunk in ids.chunks(100) {
             let joined = chunk.join(",");
             let res = self
-                .get(&format!(
+                .fetch(&format!(
                     "/catalog/{}/songs?ids={joined}&include=library",
                     self.storefront
                 ))
-                .send()
                 .await;
             let Ok(res) = res else { continue };
             if !res.status().is_success() {
@@ -674,11 +692,10 @@ impl Client {
     /// single that belongs to no album is not an error.
     pub async fn song_containers(&self, id: &str) -> Result<(Option<String>, Option<String>)> {
         let res = self
-            .get(&format!(
+            .fetch(&format!(
                 "/catalog/{}/songs/{id}?include=albums,artists",
                 self.storefront
             ))
-            .send()
             .await
             .map_err(Self::transport_error)
             .context("requesting song")?;
@@ -718,8 +735,7 @@ impl Client {
     /// and library responses have the same shape; only the URL differs.
     async fn album_resource(&self, path: &str) -> Result<AlbumResource> {
         let res = self
-            .get(path)
-            .send()
+            .fetch(path)
             .await
             .map_err(Self::transport_error)
             .context("requesting album")?;
@@ -797,8 +813,7 @@ impl Client {
     /// above, where a first page of albums is better than none.
     async fn library_pageless_albums(&self, path: &str) -> Result<Vec<Album>> {
         let res = self
-            .get(path)
-            .send()
+            .fetch(path)
             .await
             .map_err(Self::transport_error)
             .context("requesting library artist albums")?;
@@ -827,8 +842,7 @@ impl Client {
     /// As [`Client::album_resource`], for artists.
     async fn artist_resource(&self, path: &str) -> Result<ArtistResource> {
         let res = self
-            .get(path)
-            .send()
+            .fetch(path)
             .await
             .map_err(Self::transport_error)
             .context("requesting artist")?;
