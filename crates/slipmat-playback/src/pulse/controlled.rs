@@ -10,6 +10,7 @@ use std::{
 use libpulse_binding::time::MicroSeconds;
 
 use super::*;
+use crate::{DecodeStep, Undecodable};
 
 const POSITION_INTERVAL: Duration = Duration::from_millis(100);
 const POLL_INTERVAL: MicroSeconds = MicroSeconds(10_000);
@@ -35,9 +36,15 @@ pub fn play_controlled(
     commands: Receiver<Result<Transport>>,
     mut report: impl FnMut(PlaybackEvent) -> Result<()>,
 ) -> Result<()> {
+    // The decoder marks its own errors with where they happened.
     let mut block = decoder
         .next_block()?
-        .context("ALAC track is empty")?
+        .context("ALAC track is empty")
+        .context(Undecodable {
+            step: DecodeStep::EndedEarly,
+            decoded_ms: 0,
+            decoded_frames: 0,
+        })?
         .to_vec();
     let mut output = PulseOutput::open_with_flags(
         &decoder,

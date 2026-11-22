@@ -83,6 +83,11 @@ pub struct Clearer {
 }
 
 impl Clearer {
+    /// The track, once the init segment has been read.
+    pub fn track(&self) -> Option<Track> {
+        self.track
+    }
+
     pub fn push(&mut self, whole: Whole) -> Result<Option<Piece>> {
         let Whole { at, kind, bytes } = whole;
         let Some(track) = self.track else {
@@ -186,6 +191,33 @@ mod tests {
     fn the_same_track_left_encrypted_does_not_decode_to_it() {
         let (scrambled, _) = clear_stream(&encrypt_like_apple(CLEAR), false);
         assert_ne!(pcm(scrambled).ok(), Some(pcm(CLEAR.to_vec()).unwrap()));
+    }
+
+    #[test]
+    fn the_init_segment_reports_its_alac_settings_and_fragments_their_frames() {
+        let mut boxes = Boxes::default();
+        let mut clearer = Clearer::default();
+        boxes.push(&encrypt_like_apple(CLEAR));
+        let mut frames = 0;
+        while let Some(whole) = boxes.next().unwrap() {
+            if let Some(Piece::Fragment { fragment, .. }) = clearer.push(whole).unwrap() {
+                assert_eq!(fragment.shape.description, 0);
+                frames += fragment.shape.frames;
+            }
+        }
+        let track = clearer.track().unwrap();
+        let config = track.configs[0].unwrap();
+        assert_eq!((config.bit_depth, config.channels), (16, 2));
+        // Two descriptions, as Apple's files carry; the fixture's are the same.
+        assert_eq!(track.configs[1], Some(config));
+        let protection = track.protections[0].unwrap();
+        assert_eq!(protection.key_id, [0x11; 16]);
+        assert_eq!(protection.iv_size, 0);
+        assert_eq!(protection.constant_iv, Some((16, [0x22; 16])));
+        assert_eq!(track.protections[1], Some(protection));
+        // Counted from the sample durations, the frames are the decoder's.
+        let decoded = pcm(CLEAR.to_vec()).unwrap().len() as u64 / u64::from(config.channels);
+        assert_eq!(frames, decoded);
     }
 
     #[test]

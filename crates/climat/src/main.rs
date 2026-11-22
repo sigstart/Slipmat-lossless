@@ -11,6 +11,7 @@
 
 mod auth;
 mod browser;
+mod commands;
 mod link;
 mod navigation;
 mod queue;
@@ -141,13 +142,18 @@ impl Default for App {
 }
 
 fn main() -> Result<()> {
-    let auth = auth::Command::parse(std::env::args_os().skip(1))?;
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let auth = auth::Command::parse(args.iter().cloned())?;
+    let oneshot = commands::Command::parse(&args)?;
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     if let Some(command) = auth {
         return runtime.block_on(auth::run(command));
+    }
+    if let Some(command) = oneshot {
+        return runtime.block_on(commands::run(command));
     }
     let result = runtime.block_on(run());
 
@@ -1011,6 +1017,8 @@ impl App {
                 self.message = Some(Notice::bad(detail));
             }
             Event::PlaybackFailed { detail } => self.message = Some(Notice::bad(detail)),
+            // The answer to `climat check`, for the terminal that asked.
+            Event::Checked { .. } => {}
         }
     }
 }

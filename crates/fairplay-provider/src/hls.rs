@@ -28,6 +28,17 @@ pub struct Media {
     pub segments: Vec<Segment>,
     /// Distinct key URIs, in the order the segments first use them.
     pub keys: Vec<String>,
+    pub ignored: IgnoredKeys,
+}
+
+/// Later FairPlay key tags naming a key other than the track's. They are
+/// skipped, so if Apple ever meant them, everything after the first one would
+/// decrypt with the wrong key and fail as undecodable at `first_at_ms`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct IgnoredKeys {
+    pub count: u16,
+    /// Playing time at the first, summed from the segments' `#EXTINF`.
+    pub first_at_ms: Option<u64>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -35,15 +46,27 @@ pub struct Segment {
     pub bytes: Range<u64>,
     /// Index into [`Media::keys`].
     pub key: usize,
+    /// Playing time at its start, summed from the `#EXTINF` before it.
+    pub starts_at_ms: u64,
+    /// The key the playlist says it is under, honouring every tag — which
+    /// `key` does not, so the two disagree wherever a skipped tag applies.
+    pub named: NamedKey,
+}
+
+/// Which key a playlist tag names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamedKey {
+    Prefetch,
+    Track,
+    Other,
 }
 
 impl Media {
-    /// The key for the fragment that starts at `offset` in the file.
-    pub fn key_at(&self, offset: u64) -> Option<usize> {
+    /// The index of the segment holding `offset` in the file.
+    pub fn segment_at(&self, offset: u64) -> Option<usize> {
         self.segments
             .iter()
-            .find(|segment| segment.bytes.contains(&offset))
-            .map(|segment| segment.key)
+            .position(|segment| segment.bytes.contains(&offset))
     }
 }
 
@@ -107,15 +130,37 @@ pub fn parse_media(base: &Url, playlist: &str) -> Result<Media> {
     let mut next_start = 0;
     let mut file: Option<Url> = None;
     let mut segments = Vec::new();
+    let mut ignored = IgnoredKeys::default();
+    let mut elapsed_ms = 0;
+    let mut duration_ms = 0;
+    let mut track_uri: Option<String> = None;
+    let mut named = None;
     for line in playlist.lines().map(str::trim) {
         if let Some(attributes) = line.strip_prefix("#EXT-X-KEY:") {
             let attributes = parse_attributes(attributes);
             let fairplay = attribute(&attributes, "KEYFORMAT")
                 .is_some_and(|format| format.contains("streamingkeydelivery"));
-            if !fairplay || track_key_seen {
+            if !fairplay {
                 continue;
             }
             let uri = attribute(&attributes, "URI").context("EXT-X-KEY without a URI")?;
+            if track_uri.is_none() && uri != PREFETCH_KEY {
+                track_uri = Some(uri.to_owned());
+            }
+            named = Some(if uri == PREFETCH_KEY {
+                NamedKey::Prefetch
+            } else if track_uri.as_deref() == Some(uri) {
+                NamedKey::Track
+            } else {
+                NamedKey::Other
+            });
+            if track_key_seen {
+                if keys.last().is_some_and(|track| track != uri) {
+                    ignored.count = ignored.count.saturating_add(1);
+                    ignored.first_at_ms.get_or_insert(elapsed_ms);
+                }
+                continue;
+            }
             ensure!(uri.starts_with("skd://"), "the track key is not FairPlay");
             track_key_seen = uri != PREFETCH_KEY;
             key = Some(match keys.iter().position(|known| known == uri) {
@@ -125,6 +170,8 @@ pub fn parse_media(base: &Url, playlist: &str) -> Result<Media> {
                     keys.len() - 1
                 }
             });
+        } else if let Some(info) = line.strip_prefix("#EXTINF:") {
+            duration_ms = extinf_ms(info);
         } else if let Some(byterange) = line.strip_prefix("#EXT-X-BYTERANGE:") {
             range = Some(parse_byterange(byterange, next_start)?);
         } else if !line.is_empty() && !line.starts_with('#') {
@@ -135,9 +182,13 @@ pub fn parse_media(base: &Url, playlist: &str) -> Result<Media> {
                 None => file = Some(url),
             }
             next_start = bytes.end;
+            let starts_at_ms = elapsed_ms;
+            elapsed_ms += std::mem::take(&mut duration_ms);
             segments.push(Segment {
                 bytes,
                 key: key.context("a segment before any FairPlay key")?,
+                starts_at_ms,
+                named: named.context("a segment before any FairPlay key")?,
             });
         }
     }
@@ -146,7 +197,17 @@ pub fn parse_media(base: &Url, playlist: &str) -> Result<Media> {
         file: file.context("the media playlist has no file")?,
         segments,
         keys,
+        ignored,
     })
+}
+
+/// `#EXTINF:<seconds>,[title]`, in milliseconds; unreadable counts as none.
+fn extinf_ms(info: &str) -> u64 {
+    let seconds = info.split(',').next().unwrap_or_default().trim();
+    match seconds.parse::<f64>() {
+        Ok(seconds) if seconds.is_finite() && seconds > 0.0 => (seconds * 1000.0).round() as u64,
+        _ => 0,
+    }
 }
 
 /// `length[@offset]`; without an offset the range follows the previous one.
@@ -275,12 +336,65 @@ mod tests {
                 (1320..1370, 1)
             ]
         );
-        assert_eq!(media.key_at(1020), Some(0));
-        assert_eq!(media.key_at(1250), Some(1));
-        assert_eq!(media.key_at(5000), None);
+        // `c99` is skipped, after three ten-second segments.
+        assert_eq!(
+            media.ignored,
+            IgnoredKeys {
+                count: 1,
+                first_at_ms: Some(30_000)
+            }
+        );
+        assert_eq!(media.segment_at(1250), Some(2));
+        assert_eq!(media.segments[2].starts_at_ms, 20_000);
+        assert_eq!(
+            media
+                .segments
+                .iter()
+                .map(|segment| segment.named)
+                .collect::<Vec<_>>(),
+            [
+                NamedKey::Prefetch,
+                NamedKey::Prefetch,
+                NamedKey::Track,
+                NamedKey::Other
+            ]
+        );
+        let key_at = |offset| {
+            media
+                .segment_at(offset)
+                .map(|index| media.segments[index].key)
+        };
+        assert_eq!(key_at(1020), Some(0));
+        assert_eq!(key_at(1250), Some(1));
+        assert_eq!(key_at(5000), None);
         assert_eq!(
             media.file.as_str(),
             "https://aod.itunes.apple.com/itunes-assets/x/track.mp4"
+        );
+    }
+
+    #[test]
+    fn a_return_to_the_prefetch_key_is_counted_and_named() {
+        let playlist = [
+            "#EXTM3U\n".to_owned(),
+            key(PREFETCH_KEY),
+            segment("100@0"),
+            key("skd://itunes.apple.com/p1553683450/c23"),
+            segment("100"),
+            key(PREFETCH_KEY),
+            segment("100"),
+        ]
+        .concat();
+        let media = parse_media(&base(), &playlist).unwrap();
+        assert_eq!(media.segments[2].named, NamedKey::Prefetch);
+        // Decrypted with the track key regardless: that is the rule being tested.
+        assert_eq!(media.segments[2].key, 1);
+        assert_eq!(
+            media.ignored,
+            IgnoredKeys {
+                count: 1,
+                first_at_ms: Some(20_000)
+            }
         );
     }
 

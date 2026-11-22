@@ -153,6 +153,19 @@ impl ProfileStore {
     }
 }
 
+#[cfg(test)]
+impl ProfileStore {
+    /// A store at `archive`, for tests that only ask whether a session is
+    /// saved: opening a real one needs tmpfs, and saving needs Secret Service.
+    pub(crate) fn at(archive: PathBuf, root: PathBuf) -> Self {
+        Self {
+            archive,
+            root,
+            next: Cell::new(0),
+        }
+    }
+}
+
 fn is_tmpfs(path: &Path) -> io::Result<bool> {
     let path = CString::new(path.as_os_str().as_bytes())?;
     // SAFETY: `path` is NUL-terminated and `stat` is a valid out-pointer.

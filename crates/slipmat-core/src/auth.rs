@@ -12,7 +12,7 @@ use tokio::net::{UnixStream, unix::OwnedReadHalf, unix::OwnedWriteHalf};
 use tokio::time::timeout;
 
 use crate::auth_wire::{self as wire, Reader, Request};
-pub use fairplay_wire::PlaybackStage;
+pub use fairplay_wire::{DecodeStep, FragmentShape, PlaybackFault, PlaybackStage};
 
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(130);
 
@@ -44,6 +44,8 @@ pub enum Reply {
     LicenceDenied,
     PlaybackFailed {
         stage: PlaybackStage,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fault: Option<PlaybackFault>,
     },
 }
 
@@ -78,7 +80,7 @@ impl From<fairplay_wire::Reply> for Reply {
                 channels,
             },
             Provider::LicenceDenied => Self::LicenceDenied,
-            Provider::PlaybackFailed { stage } => Self::PlaybackFailed { stage },
+            Provider::PlaybackFailed { stage, fault, .. } => Self::PlaybackFailed { stage, fault },
         }
     }
 }
@@ -211,13 +213,34 @@ mod tests {
             ("output", PlaybackStage::Output),
         ] {
             let frame = json!({"type": "playbackFailed", "stage": name});
-            let reply = Reply::PlaybackFailed { stage };
+            let reply = Reply::PlaybackFailed { stage, fault: None };
             assert_eq!(serde_json::to_value(reply).unwrap(), frame);
             assert_eq!(serde_json::from_value::<Reply>(frame).unwrap(), reply);
         }
+        let frame = json!({
+            "type": "playbackFailed",
+            "stage": "stream",
+            "fault": {"kind": "refused", "status": 403, "resume": true},
+        });
+        assert_eq!(
+            serde_json::from_value::<Reply>(frame).unwrap(),
+            Reply::PlaybackFailed {
+                stage: PlaybackStage::Stream,
+                fault: Some(PlaybackFault::Refused {
+                    status: 403,
+                    resume: true
+                }),
+            }
+        );
         for frame in [
             json!({"type": "playbackFailed", "stage": "custom"}),
             json!({"type": "playbackFailed", "stage": "output", "details": "fixture"}),
+            json!({"type": "playbackFailed", "stage": "stream", "fault": {"kind": "custom"}}),
+            json!({
+                "type": "playbackFailed",
+                "stage": "stream",
+                "fault": {"kind": "refused", "status": 403, "resume": true, "text": "fixture"},
+            }),
             json!({"type": "trialFailed", "stage": "output"}),
         ] {
             assert!(serde_json::from_value::<Reply>(frame).is_err());

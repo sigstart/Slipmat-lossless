@@ -29,6 +29,9 @@ use crate::provider::{End, IO_TIMEOUT, Mode, Provider, send, send_before, valida
 
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_CONNECTIONS: usize = 32;
+/// A provider lost this often inside the window is broken, not unlucky.
+const RECOVERY_LIMIT: usize = 3;
+const RECOVERY_WINDOW: Duration = Duration::from_secs(600);
 
 pub struct Endpoint {
     task: JoinHandle<()>,
@@ -62,6 +65,7 @@ impl Endpoint {
         };
         fs::set_permissions(&socket.path, Permissions::from_mode(0o600))?;
         let profiles = open_profile_store(&socket.path);
+        let (recover, recoveries) = mpsc::unbounded_channel();
         let service = Rc::new(Service {
             provider,
             profiles,
@@ -71,8 +75,12 @@ impl Endpoint {
             catalogue: RefCell::new(None),
             profile_save: Default::default(),
             attempt_timeout: ATTEMPT_TIMEOUT,
+            recoveries: RefCell::new(Recoveries::default()),
+            recover,
+            gave_up: std::cell::Cell::new(false),
+            diagnosis: RefCell::new(None),
         });
-        let task = tokio::task::spawn_local(serve(listener, service.clone()));
+        let task = tokio::task::spawn_local(serve(listener, service.clone(), recoveries));
         tracing::info!("sign-in socket listening");
         Ok(Self {
             task,
@@ -152,7 +160,11 @@ pub(crate) async fn bind_listener(path: &Path) -> io::Result<UnixListener> {
     }
 }
 
-async fn serve(listener: UnixListener, service: Rc<Service>) {
+async fn serve(
+    listener: UnixListener,
+    service: Rc<Service>,
+    mut recoveries: mpsc::UnboundedReceiver<Duration>,
+) {
     let connections = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
     let mut clients = JoinSet::new();
     if service
@@ -162,7 +174,7 @@ async fn serve(listener: UnixListener, service: Rc<Service>) {
     {
         service.session.replace(Session::Busy);
         let restoring = service.clone();
-        clients.spawn_local(async move { restoring.restore().await });
+        clients.spawn_local(async move { restoring.restore(Restore::Startup).await });
     }
     let mut reap = tokio::time::interval(Duration::from_secs(1));
     reap.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -187,6 +199,13 @@ async fn serve(listener: UnixListener, service: Rc<Service>) {
             }
             _ = clients.join_next(), if !clients.is_empty() => {}
             _ = reap.tick() => service.reap_provider(),
+            Some(delay) = recoveries.recv() => {
+                let recovering = service.clone();
+                clients.spawn_local(async move {
+                    tokio::time::sleep(delay).await;
+                    recovering.restore(Restore::Recovery).await;
+                });
+            }
         }
     }
 }
@@ -200,6 +219,57 @@ pub struct Service {
     catalogue: RefCell<Option<slipmat_core::player::protocol::Tokens>>,
     attempt_timeout: Duration,
     profile_save: tokio::sync::Mutex<()>,
+    recoveries: RefCell<Recoveries>,
+    /// To the serve loop, which owns the tasks: restore after this delay.
+    recover: mpsc::UnboundedSender<Duration>,
+    /// Set when recovery stopped trying, until the daemon has said so.
+    gave_up: std::cell::Cell<bool>,
+    diagnosis: RefCell<Option<Box<fairplay_wire::Diagnosis>>>,
+}
+
+/// What a track is claimed for.
+#[derive(Clone, Copy)]
+enum Run {
+    Play,
+    Check,
+}
+
+impl Run {
+    fn request(self, track_id: String) -> fairplay_wire::Request {
+        match self {
+            Self::Play => fairplay_wire::Request::PlayTrack { track_id },
+            Self::Check => fairplay_wire::Request::CheckTrack { track_id },
+        }
+    }
+}
+
+/// Why a saved session is being restored.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Restore {
+    /// The daemon started: the saved queue is reloaded with it.
+    Startup,
+    /// The provider was lost: the queue in memory is still the right one.
+    Recovery,
+}
+
+/// Recent recoveries, to tell a provider that died once from one that keeps dying.
+#[derive(Default)]
+struct Recoveries {
+    recent: Vec<Instant>,
+}
+
+impl Recoveries {
+    /// How long to wait before the next attempt, doubling from a second, or
+    /// `None` once the window holds the limit.
+    fn next(&mut self, now: Instant) -> Option<Duration> {
+        self.recent
+            .retain(|&at| now.saturating_duration_since(at) < RECOVERY_WINDOW);
+        if self.recent.len() >= RECOVERY_LIMIT {
+            return None;
+        }
+        self.recent.push(now);
+        Some(Duration::from_secs(1 << (self.recent.len() - 1)))
+    }
 }
 
 pub enum PlaybackControl {
@@ -214,6 +284,10 @@ enum Session {
     SignedIn(Box<Provider>),
     /// The provider is out on a queue track; sign-out cancels it through this.
     Playing(watch::Sender<TrackState>),
+    /// The provider was lost, not signed out of, and the saved session is
+    /// being restored. The catalogue credentials stay usable meanwhile, so the
+    /// daemon sees no change of account and clears nothing.
+    Recovering,
 }
 
 #[derive(Clone, Copy)]
@@ -236,8 +310,14 @@ impl Service {
         self.restored.replace(false)
     }
 
+    /// Whether recovery gave up since this was last asked.
+    pub fn take_gave_up(&self) -> bool {
+        self.gave_up.replace(false)
+    }
+
     pub fn catalogue(&self) -> Option<slipmat_core::player::protocol::Tokens> {
-        if self.is_signed_in() {
+        let recovering = matches!(*self.session.borrow(), Session::Recovering);
+        if recovering || self.is_signed_in() {
             self.catalogue.borrow().clone()
         } else {
             self.catalogue.borrow_mut().take();
@@ -245,7 +325,34 @@ impl Service {
         }
     }
 
-    async fn restore(&self) {
+    /// The provider went away without a sign-out. With a saved session it is
+    /// brought back, unless it keeps going; without one, this is a sign-out.
+    fn lose_provider(&self) {
+        let saved = self
+            .profiles
+            .as_ref()
+            .is_some_and(ProfileStore::has_archive);
+        let delay = saved
+            .then(|| self.recoveries.borrow_mut().next(Instant::now()))
+            .flatten();
+        let recovering = delay.is_some_and(|delay| self.recover.send(delay).is_ok());
+        if recovering {
+            tracing::warn!(
+                ?delay,
+                "the playback engine stopped; restoring the saved session"
+            );
+        } else if saved {
+            tracing::warn!("the playback engine keeps stopping; giving up until the next sign-in");
+            self.gave_up.set(true);
+        }
+        *self.session.borrow_mut() = if recovering {
+            Session::Recovering
+        } else {
+            Session::SignedOut
+        };
+    }
+
+    async fn restore(&self, why: Restore) {
         let reservation = Reservation(&self.session);
         let profile = match &self.profiles {
             Some(profiles) => profiles.restored_profile().await,
@@ -268,7 +375,7 @@ impl Service {
         {
             self.catalogue.replace(provider.catalogue.take());
             self.session.replace(Session::SignedIn(Box::new(provider)));
-            self.restored.set(true);
+            self.restored.set(why == Restore::Startup);
             tracing::info!("restored Apple Music session");
             return;
         }
@@ -277,11 +384,12 @@ impl Service {
     }
 
     fn reap_provider(&self) {
-        let mut session = self.session.borrow_mut();
-        if let Session::SignedIn(provider) = &mut *session
-            && !matches!(provider.child.try_wait(), Ok(None))
-        {
-            *session = Session::SignedOut;
+        let exited = match &mut *self.session.borrow_mut() {
+            Session::SignedIn(provider) => !matches!(provider.child.try_wait(), Ok(None)),
+            _ => false,
+        };
+        if exited {
+            self.lose_provider();
         }
     }
 
@@ -289,7 +397,7 @@ impl Service {
         self.reap_provider();
         match &*self.session.borrow() {
             Session::SignedOut => Reply::SignedOut,
-            Session::Busy => Reply::Busy,
+            Session::Busy | Session::Recovering => Reply::Busy,
             Session::Playing(track) if matches!(*track.borrow(), TrackState::Active) => {
                 Reply::SignedIn
             }
@@ -299,7 +407,7 @@ impl Service {
     }
 
     pub fn is_authenticating(&self) -> bool {
-        matches!(*self.session.borrow(), Session::Busy)
+        matches!(*self.session.borrow(), Session::Busy | Session::Recovering)
     }
 
     pub fn is_signed_in(&self) -> bool {
@@ -313,7 +421,7 @@ impl Service {
 
     pub(crate) async fn sign_out(&self) -> Reply {
         self.reap_provider();
-        if matches!(*self.session.borrow(), Session::Busy) {
+        if matches!(*self.session.borrow(), Session::Busy | Session::Recovering) {
             return Reply::Busy;
         }
         if self
@@ -348,7 +456,7 @@ impl Service {
             let mut session = self.session.borrow_mut();
             match *session {
                 Session::SignedOut => return Reply::SignedOut,
-                Session::Busy | Session::Playing(_) => return Reply::Busy,
+                Session::Busy | Session::Playing(_) | Session::Recovering => return Reply::Busy,
                 Session::SignedIn(_) => std::mem::replace(&mut *session, Session::Busy),
             }
         };
@@ -465,6 +573,29 @@ impl Service {
         track_id: String,
         controls: mpsc::UnboundedReceiver<PlaybackControl>,
     ) -> Result<mpsc::UnboundedReceiver<Reply>, Reply> {
+        self.start_track(Run::Play, track_id, controls)
+    }
+
+    /// The same, decoding the track to nowhere to see whether it plays through.
+    pub fn start_check(
+        self: &Rc<Self>,
+        track_id: String,
+        controls: mpsc::UnboundedReceiver<PlaybackControl>,
+    ) -> Result<mpsc::UnboundedReceiver<Reply>, Reply> {
+        self.start_track(Run::Check, track_id, controls)
+    }
+
+    /// What the provider saw of the last track that would not decode.
+    pub fn take_diagnosis(&self) -> Option<Box<fairplay_wire::Diagnosis>> {
+        self.diagnosis.take()
+    }
+
+    fn start_track(
+        self: &Rc<Self>,
+        run: Run,
+        track_id: String,
+        controls: mpsc::UnboundedReceiver<PlaybackControl>,
+    ) -> Result<mpsc::UnboundedReceiver<Reply>, Reply> {
         if track_id.is_empty() || !track_id.bytes().all(|byte| byte.is_ascii_digit()) {
             return Err(Reply::Failed);
         }
@@ -476,7 +607,9 @@ impl Service {
             match *session {
                 Session::SignedIn(_) => {}
                 Session::SignedOut => return Err(Reply::SignedOut),
-                Session::Busy | Session::Playing(_) => return Err(Reply::Busy),
+                Session::Busy | Session::Playing(_) | Session::Recovering => {
+                    return Err(Reply::Busy);
+                }
             }
             let Session::SignedIn(provider) = std::mem::replace(&mut *session, playing) else {
                 unreachable!("idle provider was checked under the same mutable borrow");
@@ -490,9 +623,10 @@ impl Service {
             let result = tokio::select! {
                 biased;
                 _ = updates.changed() => None,
-                result = provider.play_track(track_id, controls, &events) => result,
+                result = provider.play_track(run.request(track_id), controls, &events) => result,
             };
             let reply = if let Some(reply) = result {
+                service.diagnosis.replace(provider.diagnosis.take());
                 service.session.replace(Session::SignedIn(provider));
                 reply
             } else {
@@ -503,6 +637,9 @@ impl Service {
                 };
                 drop(reservation);
                 let signing_out = matches!(*track.borrow(), TrackState::Cancelled);
+                if !signing_out {
+                    service.lose_provider();
+                }
                 track.send_replace(TrackState::Stopped(signed_out));
                 if signing_out {
                     signed_out
@@ -521,7 +658,10 @@ struct Reservation<'a>(&'a RefCell<Session>);
 impl Drop for Reservation<'_> {
     fn drop(&mut self) {
         let mut session = self.0.borrow_mut();
-        if matches!(*session, Session::Busy | Session::Playing(_)) {
+        if matches!(
+            *session,
+            Session::Busy | Session::Playing(_) | Session::Recovering
+        ) {
             *session = Session::SignedOut;
         }
     }
@@ -562,16 +702,31 @@ mod tests {
     }
 
     fn service(attempt_timeout: Duration) -> Rc<Service> {
-        Rc::new(Service {
+        service_with(attempt_timeout, None).0
+    }
+
+    /// A service with a profile store, and the serve loop's end of the
+    /// recovery channel so a test can see what was asked for.
+    fn service_with(
+        attempt_timeout: Duration,
+        profiles: Option<ProfileStore>,
+    ) -> (Rc<Service>, mpsc::UnboundedReceiver<Duration>) {
+        let (recover, recoveries) = mpsc::unbounded_channel();
+        let service = Rc::new(Service {
             provider: Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/auth-provider"),
-            profiles: None,
+            profiles,
             session: RefCell::new(Session::SignedOut),
             restored: std::cell::Cell::new(false),
             sign_out_epoch: Default::default(),
             catalogue: RefCell::new(None),
             profile_save: Default::default(),
             attempt_timeout,
-        })
+            recoveries: RefCell::new(Recoveries::default()),
+            recover,
+            gave_up: std::cell::Cell::new(false),
+            diagnosis: RefCell::new(None),
+        });
+        (service, recoveries)
     }
 
     fn credentials(account: &str) -> Request {
@@ -661,6 +816,7 @@ mod tests {
                     input: worker.stdin.take().unwrap(),
                     output: Reader::new(worker.stdout.take().unwrap()),
                     child: worker,
+                    diagnosis: None,
                 };
                 assert!(!service.is_signed_in());
                 let (controls, input) = mpsc::unbounded_channel();
@@ -731,6 +887,7 @@ mod tests {
                         "789",
                         Reply::PlaybackFailed {
                             stage: PlaybackStage::Output,
+                            fault: None,
                         },
                     ),
                     ("111", Reply::Failed),
@@ -936,6 +1093,183 @@ mod tests {
                     Reply::Expired
                 );
                 assert_eq!(client.exchange(Request::Status).await, Reply::SignedOut);
+            })
+            .await;
+    }
+
+    /// A store holding a saved session, in a directory removed on drop.
+    struct SavedSession(PathBuf);
+
+    impl SavedSession {
+        fn new() -> (Self, ProfileStore) {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let dir = std::env::temp_dir()
+                .join(format!("slipmat-recovery-{}-{unique}", std::process::id()));
+            fs::create_dir_all(dir.join("profiles")).unwrap();
+            let archive = dir.join("fairplay-session.enc");
+            fs::write(&archive, b"sealed").unwrap();
+            let store = ProfileStore::at(archive, dir.join("profiles"));
+            (Self(dir), store)
+        }
+    }
+
+    impl Drop for SavedSession {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn tokens() -> slipmat_core::player::protocol::Tokens {
+        slipmat_core::player::protocol::Tokens {
+            developer_token: "fixture-dev".into(),
+            music_user_token: Some("fixture-user".into()),
+            storefront: "us".into(),
+            authorized: true,
+        }
+    }
+
+    #[test]
+    fn recoveries_back_off_then_give_up_until_the_window_passes() {
+        let mut recoveries = Recoveries::default();
+        let start = Instant::now();
+        let delays: Vec<_> = (0..4).map(|_| recoveries.next(start)).collect();
+        assert_eq!(
+            delays,
+            [
+                Some(Duration::from_secs(1)),
+                Some(Duration::from_secs(2)),
+                Some(Duration::from_secs(4)),
+                None
+            ]
+        );
+        assert_eq!(
+            recoveries.next(start + RECOVERY_WINDOW),
+            Some(Duration::from_secs(1))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_provider_lost_mid_track_is_recovered_without_dropping_the_catalogue() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (_saved, store) = SavedSession::new();
+                let (service, mut recoveries) = service_with(ATTEMPT_TIMEOUT, Some(store));
+                // Answers the track, then dies the way an unreadable reply ends it.
+                let mut worker = Command::new("/bin/sh")
+                    .arg("-ec")
+                    .arg(r#"IFS= read -r frame; printf '%s\n' '{"type":"playing"}'"#)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .process_group(0)
+                    .kill_on_drop(true)
+                    .spawn()
+                    .unwrap();
+                let provider = Provider {
+                    catalogue: None,
+                    profile: None,
+                    input: worker.stdin.take().unwrap(),
+                    output: Reader::new(worker.stdout.take().unwrap()),
+                    child: worker,
+                    diagnosis: None,
+                };
+                service.catalogue.replace(Some(tokens()));
+                service
+                    .session
+                    .replace(Session::SignedIn(Box::new(provider)));
+
+                let reply = timeout(IO_TIMEOUT, play_to_end(&service, "123"))
+                    .await
+                    .unwrap();
+                assert_eq!(reply, Reply::Failed);
+                assert!(matches!(*service.session.borrow(), Session::Recovering));
+                assert_eq!(service.catalogue(), Some(tokens()));
+                assert!(service.is_authenticating());
+                assert_eq!(service.status(), Reply::Busy);
+                assert_eq!(recoveries.try_recv(), Ok(Duration::from_secs(1)));
+                assert_eq!(service.sign_out_epoch(), 0);
+                assert!(!service.take_gave_up());
+            })
+            .await;
+    }
+
+    #[test]
+    fn a_provider_that_keeps_stopping_ends_signed_out() {
+        let (_saved, store) = SavedSession::new();
+        let (service, mut recoveries) = service_with(ATTEMPT_TIMEOUT, Some(store));
+        service.catalogue.replace(Some(tokens()));
+        for _ in 0..RECOVERY_LIMIT {
+            service.lose_provider();
+            assert!(matches!(*service.session.borrow(), Session::Recovering));
+            assert!(recoveries.try_recv().is_ok());
+        }
+        service.lose_provider();
+        assert!(matches!(*service.session.borrow(), Session::SignedOut));
+        assert!(recoveries.try_recv().is_err());
+        assert!(service.take_gave_up());
+        assert_eq!(service.catalogue(), None);
+    }
+
+    #[test]
+    fn without_a_saved_session_a_lost_provider_is_signed_out() {
+        let (service, mut recoveries) = service_with(ATTEMPT_TIMEOUT, None);
+        service.lose_provider();
+        assert!(matches!(*service.session.borrow(), Session::SignedOut));
+        assert!(recoveries.try_recv().is_err());
+        // Nothing was saved, so there was nothing to give up on.
+        assert!(!service.take_gave_up());
+    }
+
+    #[tokio::test]
+    async fn a_check_asks_for_checktrack_and_keeps_what_the_provider_saw() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let service = service(ATTEMPT_TIMEOUT);
+                let mut worker = Command::new("/bin/sh")
+                    .arg("-ec")
+                    .arg(
+                        r#"
+                        IFS= read -r frame
+                        [ "$frame" = '{"type":"checkTrack","track_id":"123"}' ]
+                        printf '%s\n' '{"type":"playbackFailed","stage":"output","fault":{"kind":"decoder","step":"audio","decoded_ms":986940},"diagnosis":{"fragment":{"index":66,"startsAtMs":986960,"samples":161,"splitSamples":0,"tfhdFlags":131098,"trunFlags":513,"description":2}}}'
+                        IFS= read -r frame
+                        "#,
+                    )
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .process_group(0)
+                    .kill_on_drop(true)
+                    .spawn()
+                    .unwrap();
+                let provider = Provider {
+                    catalogue: None,
+                    profile: None,
+                    input: worker.stdin.take().unwrap(),
+                    output: Reader::new(worker.stdout.take().unwrap()),
+                    child: worker,
+                    diagnosis: None,
+                };
+                service.session.replace(Session::SignedIn(Box::new(provider)));
+
+                let (_control, controls) = mpsc::unbounded_channel();
+                let mut events = service.start_check("123".to_owned(), controls).unwrap();
+                let reply = timeout(IO_TIMEOUT, events.recv()).await.unwrap();
+                assert!(matches!(
+                    reply,
+                    Some(Reply::PlaybackFailed {
+                        stage: PlaybackStage::Output,
+                        fault: Some(_),
+                    })
+                ));
+                let diagnosis = service.take_diagnosis().unwrap();
+                assert_eq!(diagnosis.fragment.map(|shape| shape.description), Some(2));
+                // Taken once: the next track's failure is not this one's.
+                assert!(service.take_diagnosis().is_none());
+                assert!(service.is_signed_in());
             })
             .await;
     }

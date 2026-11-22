@@ -767,8 +767,14 @@ sh scripts/fairplay/prepare.sh  # fetch and verify the FairPlay libraries
 cargo build --locked --workspace
 target/debug/slipmat
 target/debug/climat
+target/debug/climat current     # the playing track's catalogue id; `queue` lists all of them
+target/debug/climat check <id>  # decode a track with no sound, in seconds: does it play through?
 make check
 ```
+
+`tracing` writes to **stdout**, so a daemon log needs both streams:
+`RUST_LOG=slipmatd=debug target/debug/slipmatd >/tmp/slipmatd.log 2>&1`.
+Redirecting only stderr leaves the file empty.
 
 ## Conventions
 

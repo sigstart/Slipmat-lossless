@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 
 use crate::catalogue;
 use crate::fairplay::{Challenge, Credentials, Fairplay};
-use crate::play::{self, Control, Player, Update};
+use crate::play::{self, Control, Output, Player, Update};
 
 #[derive(Clone, Copy)]
 pub enum Mode {
@@ -151,7 +151,16 @@ async fn serve_tracks(wire: &mut Wire, player: Arc<Player>) -> Result<()> {
                 };
                 match (request, &mut track) {
                     (Request::PlayTrack { track_id }, None) => {
-                        let controls = play::spawn(player.clone(), track_id, updates.clone());
+                        let controls =
+                            play::spawn(player.clone(), track_id, Output::Speakers, updates.clone());
+                        track = Some(Running {
+                            controls,
+                            stopping: false,
+                        });
+                    }
+                    (Request::CheckTrack { track_id }, None) => {
+                        let controls =
+                            play::spawn(player.clone(), track_id, Output::Discard, updates.clone());
                         track = Some(Running {
                             controls,
                             stopping: false,

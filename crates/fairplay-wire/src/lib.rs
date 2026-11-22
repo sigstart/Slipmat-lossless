@@ -25,9 +25,21 @@ pub const MAX_FRAME: usize = 8192;
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Request {
     Begin,
-    Credentials { account: Secret, password: Secret },
-    VerificationCode { code: Secret },
-    PlayTrack { track_id: String },
+    Credentials {
+        account: Secret,
+        password: Secret,
+    },
+    VerificationCode {
+        code: Secret,
+    },
+    PlayTrack {
+        track_id: String,
+    },
+    /// Download, decrypt and decode a track with no audio output, as fast as
+    /// it arrives, to find out whether it plays through.
+    CheckTrack {
+        track_id: String,
+    },
     Pause,
     Resume,
     Stop,
@@ -42,6 +54,7 @@ impl<'de> Deserialize<'de> for Request {
             Credentials,
             VerificationCode,
             PlayTrack,
+            CheckTrack,
             Pause,
             Resume,
             Stop,
@@ -75,6 +88,9 @@ impl<'de> Deserialize<'de> for Request {
                 Ok(Self::VerificationCode { code })
             }
             (Kind::PlayTrack, None, None, None, Some(track_id)) => Ok(Self::PlayTrack { track_id }),
+            (Kind::CheckTrack, None, None, None, Some(track_id)) => {
+                Ok(Self::CheckTrack { track_id })
+            }
             (Kind::Pause, None, None, None, None) => Ok(Self::Pause),
             (Kind::Resume, None, None, None, None) => Ok(Self::Resume),
             (Kind::Stop, None, None, None, None) => Ok(Self::Stop),
@@ -109,6 +125,12 @@ pub enum Reply {
     LicenceDenied,
     PlaybackFailed {
         stage: PlaybackStage,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fault: Option<PlaybackFault>,
+        /// Detail for the log, boxed apart from `fault` so the fault itself
+        /// stays small enough to return by value on every fragment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diagnosis: Option<Box<Diagnosis>>,
     },
 }
 
@@ -143,6 +165,157 @@ pub enum PlaybackStage {
     CatalogueAsset,
     Stream,
     Output,
+}
+
+/// What went wrong inside a stage, as codes rather than text: nothing from
+/// the network or the library crosses the pipe as prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum PlaybackFault {
+    /// The media playlists could not be fetched or read.
+    Playlist,
+    /// The shared prefetch key would not open.
+    PrefetchKey,
+    /// The thread that owns the FairPlay library stopped answering.
+    Worker,
+    /// Nothing arrived for the stall timeout, and resuming did not help.
+    Stalled,
+    /// The download broke off, and resuming did not help.
+    Dropped,
+    /// The CDN answered with an unexpected status, first time or on a resume.
+    Refused { status: u16, resume: bool },
+    /// The file is not the fragmented MP4 its playlist described.
+    Container,
+    /// A lease refresh freed the track key and it would not reopen.
+    KeyReopen,
+    /// FairPlay refused a sample, with the library's status code.
+    Decrypt { status: i32 },
+    /// The clear stream did not decode as ALAC: which step failed and after
+    /// how much audio. With how many later key tags the playlist had that were
+    /// skipped, and when the first began: a failure after that point is the
+    /// wrong key, not a broken decoder. Every field is defaulted, so a
+    /// provider built before any of them still parses.
+    Decoder {
+        #[serde(default)]
+        step: Option<DecodeStep>,
+        #[serde(default)]
+        decoded_ms: Option<u64>,
+        #[serde(default)]
+        ignored_keys: u16,
+        #[serde(default)]
+        first_ignored_at_ms: Option<u64>,
+    },
+    /// The audio server refused or dropped the output stream.
+    AudioServer,
+}
+
+/// What the provider saw of a file that would not decode: the fragment that
+/// failed beside the first, and the init segment's two sample descriptions,
+/// of which only the first is decoded with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Diagnosis {
+    #[serde(default)]
+    pub fragment: Option<FragmentShape>,
+    #[serde(default)]
+    pub first_fragment: Option<FragmentShape>,
+    #[serde(default)]
+    pub first_config: Option<AlacConfig>,
+    #[serde(default)]
+    pub second_config: Option<AlacConfig>,
+    #[serde(default)]
+    pub first_protection: Option<Protection>,
+    #[serde(default)]
+    pub second_protection: Option<Protection>,
+    /// Where the playlist changes key, honouring every tag, up to
+    /// [`MAX_CHANGES`]. The provider decrypts with the first two keys only.
+    #[serde(default)]
+    pub key_changes: Vec<KeyChange>,
+    /// Where the fragments fed so far change sample description, likewise.
+    #[serde(default)]
+    pub description_changes: Vec<DescriptionChange>,
+}
+
+/// How many changes a [`Diagnosis`] lists, so it fits in one frame.
+pub const MAX_CHANGES: usize = 32;
+
+/// A sample description's encryption, as hex. Key ids and IVs travel in the
+/// file in the clear; the key itself never leaves the provider.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Protection {
+    pub key_id: String,
+    pub iv_size: u8,
+    #[serde(default)]
+    pub constant_iv: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KeyChange {
+    pub segment: u32,
+    pub key: NamedKey,
+}
+
+/// Which key a playlist tag names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NamedKey {
+    Prefetch,
+    Track,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DescriptionChange {
+    pub segment: u32,
+    /// 0 is the track's default.
+    pub description: u32,
+}
+
+/// Which part of decoding failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DecodeStep {
+    /// The MP4 around the audio could not be read.
+    Container,
+    /// An ALAC frame did not decode.
+    Audio,
+    /// The demuxer ran out of audio before the stream ended.
+    EndedEarly,
+}
+
+/// How one fragment of the file was laid out and encrypted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FragmentShape {
+    /// Its media segment in the playlist, counting from zero.
+    pub index: u32,
+    pub starts_at_ms: u64,
+    pub samples: u32,
+    /// Samples encrypted in more than one piece.
+    pub split_samples: u32,
+    pub tfhd_flags: u32,
+    /// Every `trun` box's flags, combined.
+    pub trun_flags: u32,
+    /// The sample description it names, or 0 for the track's default.
+    #[serde(default)]
+    pub description: u32,
+    /// How old the key context was that decrypted it.
+    #[serde(default)]
+    pub key_age_ms: Option<u64>,
+}
+
+/// The parts of an ALAC magic cookie that decide whether a frame decodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AlacConfig {
+    pub frame_length: u32,
+    pub bit_depth: u8,
+    pub channels: u8,
+    pub max_frame_bytes: u32,
+    pub sample_rate: u32,
 }
 
 /// A credential or code, zeroised on drop and never printed.
@@ -281,6 +454,7 @@ mod tests {
             json!({"type": "credentials", "account": "a@example.invalid", "password": "pw"}),
             json!({"type": "verificationCode", "code": "123456"}),
             json!({"type": "playTrack", "track_id": "123"}),
+            json!({"type": "checkTrack", "track_id": "123"}),
             json!({"type": "pause"}),
             json!({"type": "resume"}),
             json!({"type": "stop"}),
@@ -296,6 +470,7 @@ mod tests {
         assert!(request(json!({"type": "begin", "code": "123456"})).is_err());
         assert!(request(json!({"type": "credentials", "account": "a"})).is_err());
         assert!(request(json!({"type": "playTrack"})).is_err());
+        assert!(request(json!({"type": "checkTrack"})).is_err());
         assert!(request(json!({"type": "status"})).is_err());
         assert!(request(json!({"type": "pause", "extra": 1})).is_err());
     }
@@ -323,12 +498,109 @@ mod tests {
             Reply::LicenceDenied,
             Reply::PlaybackFailed {
                 stage: PlaybackStage::CatalogueAuthorization,
+                fault: None,
+                diagnosis: None,
+            },
+            Reply::PlaybackFailed {
+                stage: PlaybackStage::Stream,
+                fault: Some(PlaybackFault::Refused {
+                    status: 403,
+                    resume: true,
+                }),
+                diagnosis: None,
+            },
+            Reply::PlaybackFailed {
+                stage: PlaybackStage::Stream,
+                fault: Some(PlaybackFault::Decrypt { status: -2 }),
+                diagnosis: None,
             },
         ];
         for reply in replies {
             let text = serde_json::to_string(&reply).unwrap();
             assert_eq!(serde_json::from_str::<Reply>(&text).unwrap(), reply);
         }
+    }
+
+    #[test]
+    fn a_decoder_fault_from_a_provider_without_key_counts_still_parses() {
+        let frame = json!({
+            "type": "playbackFailed",
+            "stage": "output",
+            "fault": {"kind": "decoder"},
+        });
+        assert_eq!(
+            serde_json::from_value::<Reply>(frame).unwrap(),
+            Reply::PlaybackFailed {
+                stage: PlaybackStage::Output,
+                fault: Some(PlaybackFault::Decoder {
+                    step: None,
+                    decoded_ms: None,
+                    ignored_keys: 0,
+                    first_ignored_at_ms: None
+                }),
+                diagnosis: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_full_decoder_fault_round_trips() {
+        let shape = |index, starts_at_ms| FragmentShape {
+            index,
+            starts_at_ms,
+            samples: 161,
+            split_samples: 0,
+            tfhd_flags: 0x2_0000,
+            trun_flags: 0x201,
+            description: 2,
+            key_age_ms: Some(912_000),
+        };
+        let config = AlacConfig {
+            frame_length: 4096,
+            bit_depth: 24,
+            channels: 2,
+            max_frame_bytes: 0,
+            sample_rate: 44_100,
+        };
+        let reply = Reply::PlaybackFailed {
+            stage: PlaybackStage::Output,
+            fault: Some(PlaybackFault::Decoder {
+                step: Some(DecodeStep::Audio),
+                decoded_ms: Some(987_012),
+                ignored_keys: 0,
+                first_ignored_at_ms: None,
+            }),
+            diagnosis: Some(Box::new(Diagnosis {
+                fragment: Some(shape(66, 986_940)),
+                first_fragment: Some(shape(0, 0)),
+                first_config: Some(config),
+                second_config: Some(AlacConfig {
+                    bit_depth: 16,
+                    ..config
+                }),
+                first_protection: Some(Protection {
+                    key_id: "11".repeat(16),
+                    iv_size: 0,
+                    constant_iv: Some("22".repeat(16)),
+                }),
+                second_protection: None,
+                key_changes: (0..MAX_CHANGES as u32)
+                    .map(|segment| KeyChange {
+                        segment,
+                        key: NamedKey::Prefetch,
+                    })
+                    .collect(),
+                description_changes: (0..MAX_CHANGES as u32)
+                    .map(|segment| DescriptionChange {
+                        segment,
+                        description: 2,
+                    })
+                    .collect(),
+            })),
+        };
+        let text = serde_json::to_string(&reply).unwrap();
+        assert!(text.len() < MAX_FRAME);
+        assert_eq!(serde_json::from_str::<Reply>(&text).unwrap(), reply);
     }
 
     #[test]
@@ -351,10 +623,21 @@ mod tests {
         assert!(serde_json::from_value::<Reply>(json!({"type": "signedIn"})).is_err());
         assert_eq!(
             serde_json::to_value(Reply::PlaybackFailed {
-                stage: PlaybackStage::Stream
+                stage: PlaybackStage::Stream,
+                fault: None,
+                diagnosis: None,
             })
             .unwrap(),
             json!({"type": "playbackFailed", "stage": "stream"})
+        );
+        assert_eq!(
+            serde_json::to_value(Reply::PlaybackFailed {
+                stage: PlaybackStage::Stream,
+                fault: Some(PlaybackFault::Dropped),
+                diagnosis: None,
+            })
+            .unwrap(),
+            json!({"type": "playbackFailed", "stage": "stream", "fault": {"kind": "dropped"}})
         );
     }
 

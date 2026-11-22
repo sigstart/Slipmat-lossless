@@ -21,10 +21,10 @@ use std::ffi::{CStr, CString, OsStr, c_char, c_int, c_uint, c_void};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
-use fairplay_wire::Secret;
+use anyhow::{Context, Result, anyhow, bail};
+use fairplay_wire::{PlaybackFault, Secret};
 use serde::Deserialize;
 use tokio::sync::{mpsc::UnboundedSender, oneshot};
 
@@ -79,7 +79,7 @@ enum Job {
     Decrypt {
         key: usize,
         fragment: Fragment,
-        done: oneshot::Sender<Result<Fragment>>,
+        done: oneshot::Sender<Result<(Fragment, Duration), PlaybackFault>>,
     },
 }
 
@@ -146,14 +146,20 @@ impl Fairplay {
     }
 
     /// Decrypts a fragment's protected ranges in place with an open key.
-    pub async fn decrypt(&self, key: usize, fragment: Fragment) -> Result<Fragment> {
+    /// Also says how old the key context was that decrypted it.
+    pub async fn decrypt(
+        &self,
+        key: usize,
+        fragment: Fragment,
+    ) -> Result<(Fragment, Duration), PlaybackFault> {
         let (done, result) = oneshot::channel();
         self.send(Job::Decrypt {
             key,
             fragment,
             done,
-        })?;
-        result.await?
+        })
+        .map_err(|_| PlaybackFault::Worker)?;
+        result.await.map_err(|_| PlaybackFault::Worker)?
     }
 
     fn send(&self, job: Job) -> Result<()> {
@@ -206,8 +212,10 @@ fn serve(library: Library, inbox: mpsc::Receiver<Job>) {
                 done,
             } => {
                 let result = match keys.get_mut(key) {
-                    Some(key) => key.decrypt(&library, &mut fragment).map(|()| fragment),
-                    None => Err(anyhow!("no such key")),
+                    Some(key) => key
+                        .decrypt(&library, &mut fragment)
+                        .map(|age| (fragment, age)),
+                    None => Err(PlaybackFault::Container),
                 };
                 let _ = done.send(result);
             }
@@ -222,6 +230,7 @@ struct KeyContext {
     uri: CString,
     handle: *mut c_void,
     epoch: c_uint,
+    opened: Instant,
 }
 
 impl KeyContext {
@@ -231,6 +240,7 @@ impl KeyContext {
             uri: CString::new(request.uri.as_str()).ok()?,
             handle: std::ptr::null_mut(),
             epoch: 0,
+            opened: Instant::now(),
         };
         key.reopen(library).then_some(key)
     }
@@ -240,28 +250,39 @@ impl KeyContext {
         self.handle = unsafe {
             (library.open_key_context)(self.adam.as_ptr(), self.uri.as_ptr(), &mut self.epoch)
         };
+        self.opened = Instant::now();
         !self.handle.is_null()
     }
 
-    fn decrypt(&mut self, library: &Library, fragment: &mut Fragment) -> Result<()> {
+    /// Decrypts in place and says how old the context was that did it.
+    fn decrypt(
+        &mut self,
+        library: &Library,
+        fragment: &mut Fragment,
+    ) -> Result<Duration, PlaybackFault> {
+        let age = self.opened.elapsed();
         for range in &fragment.protected {
             let block = fragment
                 .bytes
                 .get_mut(range.clone())
-                .context("protected range outside the fragment")?;
+                .ok_or(PlaybackFault::Container)?;
             let mut status = self.decrypt_block(library, block)?;
             // A lease refresh freed the context: reopen it and retry once.
             if status == STALE_CONTEXT {
-                ensure!(self.reopen(library), "the key could not be reopened");
+                if !self.reopen(library) {
+                    return Err(PlaybackFault::KeyReopen);
+                }
                 status = self.decrypt_block(library, block)?;
             }
-            ensure!(status == 0, "FairPlay could not decrypt a sample");
+            if status != 0 {
+                return Err(PlaybackFault::Decrypt { status });
+            }
         }
-        Ok(())
+        Ok(age)
     }
 
-    fn decrypt_block(&self, library: &Library, block: &mut [u8]) -> Result<c_int> {
-        let len = u32::try_from(block.len())?;
+    fn decrypt_block(&self, library: &Library, block: &mut [u8]) -> Result<c_int, PlaybackFault> {
+        let len = u32::try_from(block.len()).map_err(|_| PlaybackFault::Container)?;
         // SAFETY: the handle came from `hybris_open_kd_ctx_from_uri` with this
         // epoch, and `block` is `len` writable bytes of whole 16-byte blocks.
         Ok(unsafe { (library.decrypt)(self.handle, self.epoch, block.as_mut_ptr(), len) })

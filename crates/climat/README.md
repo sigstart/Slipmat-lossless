@@ -53,6 +53,19 @@ verification code are visible as you type. The password stays hidden. Press `Ctr
 `climat sign-in-status` reports whether an Apple Music session is active,
 and `climat sign-out` ends the session. Run `climat` to open the player UI.
 
+### Track commands
+
+`climat current` prints the playing track's Apple Music catalogue id, then its
+title and artist. `climat queue` lists the whole queue the same way, with `>`
+beside the current track — play a playlist, then list the queue, to get every
+id in it.
+
+`climat check [id]` downloads, decrypts and decodes a track with no sound, as
+fast as it downloads, and reports whether it plays through. Without an id it
+checks the current track. It stops playback first, and the stopped track starts
+again from its beginning. When a track fails, the second line is what the player
+saw of the file; the command exits non-zero, so it can be scripted.
+
 ## The bars
 
 CLImat displays the visualiser by reading a monitor source, the loopback every output

@@ -14,9 +14,12 @@
 //!    a pipe of a few fragments that the decoder reads on its own thread.
 //!    Decrypted audio exists only in that pipe and in the decoder.
 //!
-//! A download that stalls for 30 s or breaks off resumes with a `Range`
-//! request from the start of the box it was in, up to three times. A CDN that
-//! refuses ranges fails the track as `stream`.
+//! A download that stalls for 30 s, breaks off or meets a 5xx resumes with a
+//! `Range` request from the start of the box it was in, up to three times. A
+//! CDN that ignores the range and answers 200 is read past what we have.
+//!
+//! Every failure carries a [`PlaybackFault`], so the daemon can say which of
+//! these it was rather than "the stream could not be completed".
 
 use std::io::{self, Read};
 use std::path::Path;
@@ -25,9 +28,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use fairplay_wire::{Catalogue, PlaybackStage, Reply};
+use fairplay_wire::{
+    Catalogue, DecodeStep, DescriptionChange, Diagnosis, FragmentShape, KeyChange, MAX_CHANGES,
+    NamedKey, PlaybackFault, PlaybackStage, Reply,
+};
 use reqwest::StatusCode;
-use slipmat_playback::{AlacDecoder, PcmFormat, PlaybackEvent, Transport, play_controlled};
+use slipmat_playback::{
+    AlacDecoder, PcmFormat, PlaybackEvent, Transport, Undecodable, play_controlled,
+};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{sleep, timeout};
 
@@ -35,12 +43,22 @@ use crate::catalogue;
 use crate::cbcs::{Boxes, Clearer, Piece};
 use crate::fairplay::{Fairplay, KeyRequest};
 use crate::hls::{self, Media, PREFETCH_KEY};
+use crate::mp4::{AlacConfig, Protection, Shape};
 
 const AUDIO_SOCKET: &str = "/audio/native";
 const STALL: Duration = Duration::from_secs(30);
 const RETRIES: u32 = 3;
 /// Fragments buffered ahead of the decoder.
 const PIPE_FRAGMENTS: usize = 4;
+
+/// Where the decoded audio goes.
+#[derive(Clone, Copy)]
+pub enum Output {
+    Speakers,
+    /// Nowhere: the track is decoded as fast as it arrives, to check it.
+    /// Pause and resume do nothing; stopping still works, by closing the pipe.
+    Discard,
+}
 
 pub enum Control {
     Pause,
@@ -80,18 +98,31 @@ impl Player {
 pub fn spawn(
     player: Arc<Player>,
     track_id: String,
+    output: Output,
     updates: mpsc::UnboundedSender<Update>,
 ) -> mpsc::UnboundedSender<Control> {
     let (controls, inbox) = mpsc::unbounded_channel();
     tokio::spawn(async move {
-        let reply = player.play(&track_id, inbox, &updates).await;
+        let reply = player.play(&track_id, output, inbox, &updates).await;
         let _ = updates.send(Update::Finished(reply));
     });
     controls
 }
 
 fn failed(stage: PlaybackStage) -> Reply {
-    Reply::PlaybackFailed { stage }
+    Reply::PlaybackFailed {
+        stage,
+        fault: None,
+        diagnosis: None,
+    }
+}
+
+fn faulted(stage: PlaybackStage, fault: PlaybackFault) -> Reply {
+    Reply::PlaybackFailed {
+        stage,
+        fault: Some(fault),
+        diagnosis: None,
+    }
 }
 
 fn is_track_id(id: &str) -> bool {
@@ -105,6 +136,7 @@ impl Player {
     async fn play(
         &self,
         track_id: &str,
+        output: Output,
         mut controls: mpsc::UnboundedReceiver<Control>,
         updates: &mpsc::UnboundedSender<Update>,
     ) -> Reply {
@@ -121,7 +153,7 @@ impl Player {
             }
         };
         match media {
-            Ok(media) => self.stream(&media, paused, controls, updates).await,
+            Ok(media) => self.stream(&media, output, paused, controls, updates).await,
             Err(reply) => reply,
         }
     }
@@ -136,7 +168,7 @@ impl Player {
             .map_err(failed)?;
         let media = hls::load(&self.cdn, &asset)
             .await
-            .map_err(|_| failed(PlaybackStage::Stream))?;
+            .map_err(|_| faulted(PlaybackStage::Stream, PlaybackFault::Playlist))?;
         let keys = media
             .keys
             .iter()
@@ -148,23 +180,31 @@ impl Player {
         match self.fairplay.open_keys(keys).await {
             Ok(Ok(())) => Ok(media),
             Ok(Err(refused)) if media.keys[refused] != PREFETCH_KEY => Err(Reply::LicenceDenied),
-            _ => Err(failed(PlaybackStage::Stream)),
+            Ok(Err(_)) => Err(faulted(PlaybackStage::Stream, PlaybackFault::PrefetchKey)),
+            Err(_) => Err(faulted(PlaybackStage::Stream, PlaybackFault::Worker)),
         }
     }
 
     async fn stream(
         &self,
         media: &Media,
+        output: Output,
         paused: bool,
         mut controls: mpsc::UnboundedReceiver<Control>,
         updates: &mpsc::UnboundedSender<Update>,
     ) -> Reply {
         let (pipe, pieces) = mpsc::channel(PIPE_FRAGMENTS);
-        let Ok(mut audio) = Audio::start(PipeReader::new(pieces), paused) else {
+        let Ok(mut audio) = Audio::start(PipeReader::new(pieces), output, paused) else {
             return failed(PlaybackStage::Output);
         };
-        let mut feed: Option<Feeding<'_>> = Some(Box::pin(self.feed(media, pipe)));
-        let mut feed_failed = false;
+        let seen = Seen::new(Fed {
+            shapes: vec![None; media.segments.len()],
+            configs: [None; 2],
+            protections: [None; 2],
+            key_ages: vec![None; media.segments.len()],
+        });
+        let mut feed: Option<Feeding<'_>> = Some(Box::pin(self.feed(media, pipe, &seen)));
+        let mut feed_fault = None;
         loop {
             tokio::select! {
                 biased;
@@ -175,9 +215,9 @@ impl Player {
                     }
                 }, if feed.is_some() => {
                     feed = None;
-                    if fed.is_err() {
+                    if let Err(fault) = fed {
                         // The decoder would take a cut-off stream for its end.
-                        feed_failed = true;
+                        feed_fault = Some(fault);
                         audio.stop();
                     }
                 }
@@ -196,10 +236,11 @@ impl Player {
                     while let Ok(event) = audio.events.try_recv() {
                         forward(updates, event);
                     }
-                    return match done {
-                        Ok(Ok(format)) if !feed_failed => played(format),
-                        _ if feed_failed => failed(PlaybackStage::Stream),
-                        _ => failed(PlaybackStage::Output),
+                    return match (feed_fault, done) {
+                        (Some(fault), _) => faulted(PlaybackStage::Stream, fault),
+                        (None, Ok(Ok(format))) => played(format),
+                        (None, Ok(Err(error))) => output_failure(&error, media, &seen),
+                        (None, Err(_)) => failed(PlaybackStage::Output),
                     };
                 }
             }
@@ -207,17 +248,22 @@ impl Player {
     }
 
     /// Downloads, clears and pipes the whole file, resuming after breaks.
-    async fn feed(&self, media: &Media, pipe: mpsc::Sender<Vec<u8>>) -> Result<(), Fault> {
+    async fn feed(
+        &self,
+        media: &Media,
+        pipe: mpsc::Sender<Vec<u8>>,
+        seen: &Seen,
+    ) -> Result<(), PlaybackFault> {
         let mut boxes = Boxes::default();
         let mut clearer = Clearer::default();
         let mut retries = 0;
         loop {
             let offset = boxes.resume_at();
             match self
-                .download(media, offset, &mut boxes, &mut clearer, &pipe)
+                .download(media, offset, &mut boxes, &mut clearer, &pipe, seen)
                 .await
             {
-                Err(Fault::Network) if retries < RETRIES => {
+                Err(fault) if resumable(fault) && retries < RETRIES => {
                     retries += 1;
                     sleep(Duration::from_secs(u64::from(retries))).await;
                 }
@@ -233,62 +279,221 @@ impl Player {
         boxes: &mut Boxes,
         clearer: &mut Clearer,
         pipe: &mpsc::Sender<Vec<u8>>,
-    ) -> Result<(), Fault> {
+        seen: &Seen,
+    ) -> Result<(), PlaybackFault> {
         let mut request = self.cdn.get(media.file.clone());
-        let expected = if offset == 0 {
-            StatusCode::OK
-        } else {
+        if offset > 0 {
             request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
-            StatusCode::PARTIAL_CONTENT
-        };
+        }
         let mut response = timeout(STALL, request.send())
             .await
-            .map_err(|_| Fault::Network)?
-            .map_err(|_| Fault::Network)?;
-        if response.status() != expected {
-            return Err(Fault::Other);
-        }
+            .map_err(|_| PlaybackFault::Stalled)?
+            .map_err(|_| PlaybackFault::Dropped)?;
+        let mut skip = match response.status() {
+            StatusCode::OK => offset,
+            StatusCode::PARTIAL_CONTENT if offset > 0 => 0,
+            status => {
+                return Err(PlaybackFault::Refused {
+                    status: status.as_u16(),
+                    resume: offset > 0,
+                });
+            }
+        };
         loop {
             let chunk = timeout(STALL, response.chunk())
                 .await
-                .map_err(|_| Fault::Network)?
-                .map_err(|_| Fault::Network)?;
-            let Some(chunk) = chunk else {
-                return if boxes.is_between_boxes() {
+                .map_err(|_| PlaybackFault::Stalled)?
+                .map_err(|_| PlaybackFault::Dropped)?;
+            let Some(mut chunk) = chunk else {
+                return if skip == 0 && boxes.is_between_boxes() {
                     Ok(())
                 } else {
-                    Err(Fault::Network)
+                    Err(PlaybackFault::Dropped)
                 };
             };
+            if skip > 0 {
+                let skipped = chunk.len().min(usize::try_from(skip).unwrap_or(usize::MAX));
+                skip -= skipped as u64;
+                chunk = chunk.slice(skipped..);
+            }
             boxes.push(&chunk);
-            while let Some(whole) = boxes.next().map_err(|_| Fault::Other)? {
-                let piece = clearer.push(whole).map_err(|_| Fault::Other)?;
+            while let Some(whole) = boxes.next().map_err(|_| PlaybackFault::Container)? {
+                let piece = clearer.push(whole).map_err(|_| PlaybackFault::Container)?;
                 let bytes = match piece {
                     None => continue,
-                    Some(Piece::Init(bytes)) => bytes,
+                    Some(Piece::Init(bytes)) => {
+                        if let (Ok(mut seen), Some(track)) = (seen.lock(), clearer.track()) {
+                            seen.configs = track.configs;
+                            seen.protections = track.protections;
+                        }
+                        bytes
+                    }
                     Some(Piece::Fragment { at, fragment }) => {
-                        let key = media.key_at(at).ok_or(Fault::Other)?;
-                        self.fairplay
-                            .decrypt(key, fragment)
-                            .await
-                            .map_err(|_| Fault::Other)?
-                            .bytes
+                        let segment = media.segment_at(at).ok_or(PlaybackFault::Container)?;
+                        if let Ok(mut seen) = seen.lock()
+                            && let Some(slot) = seen.shapes.get_mut(segment)
+                        {
+                            *slot = Some(fragment.shape);
+                        }
+                        let key = media.segments[segment].key;
+                        let (fragment, key_age) = self.fairplay.decrypt(key, fragment).await?;
+                        if let Ok(mut seen) = seen.lock()
+                            && let Some(slot) = seen.key_ages.get_mut(segment)
+                        {
+                            *slot = u64::try_from(key_age.as_millis()).ok();
+                        }
+                        fragment.bytes
                     }
                 };
-                pipe.send(bytes).await.map_err(|_| Fault::Other)?;
+                // The decoder stopped reading: its own result says why.
+                if pipe.send(bytes).await.is_err() {
+                    return Ok(());
+                }
             }
         }
     }
 }
 
-/// Why the download stopped: a break worth resuming, or anything else.
-enum Fault {
-    Network,
-    Other,
+/// A break worth resuming from the box it was in.
+fn resumable(fault: PlaybackFault) -> bool {
+    match fault {
+        PlaybackFault::Stalled | PlaybackFault::Dropped => true,
+        PlaybackFault::Refused { status, .. } => status >= 500,
+        _ => false,
+    }
+}
+
+fn output_failure(error: &anyhow::Error, media: &Media, seen: &Seen) -> Reply {
+    let Some(failed) = error.downcast_ref::<Undecodable>() else {
+        return faulted(PlaybackStage::Output, PlaybackFault::AudioServer);
+    };
+    let seen = seen.lock().ok();
+    let shapes = seen.as_ref().map_or(&[][..], |seen| &seen.shapes[..]);
+    let configs = seen.as_ref().map_or([None; 2], |seen| seen.configs);
+    let protections = seen.as_ref().map_or([None; 2], |seen| seen.protections);
+    let shape_of = |index: usize| -> Option<FragmentShape> {
+        let shape = (*shapes.get(index)?)?;
+        Some(FragmentShape {
+            index: u32::try_from(index).ok()?,
+            starts_at_ms: media.segments.get(index)?.starts_at_ms,
+            samples: shape.samples,
+            split_samples: shape.split_samples,
+            tfhd_flags: shape.tfhd_flags,
+            trun_flags: shape.trun_flags,
+            description: shape.description,
+            key_age_ms: seen.as_ref()?.key_ages.get(index).copied().flatten(),
+        })
+    };
+    let first = shapes.iter().position(Option::is_some);
+    Reply::PlaybackFailed {
+        stage: PlaybackStage::Output,
+        fault: Some(PlaybackFault::Decoder {
+            step: Some(match failed.step {
+                slipmat_playback::DecodeStep::Container => DecodeStep::Container,
+                slipmat_playback::DecodeStep::Audio => DecodeStep::Audio,
+                slipmat_playback::DecodeStep::EndedEarly => DecodeStep::EndedEarly,
+            }),
+            decoded_ms: Some(failed.decoded_ms),
+            ignored_keys: media.ignored.count,
+            first_ignored_at_ms: media.ignored.first_at_ms,
+        }),
+        diagnosis: Some(Box::new(Diagnosis {
+            fragment: failing_fragment(shapes, failed.decoded_frames).and_then(shape_of),
+            first_fragment: first.and_then(shape_of),
+            first_config: configs[0].map(wire_config),
+            second_config: configs[1].map(wire_config),
+            first_protection: protections[0].map(wire_protection),
+            second_protection: protections[1].map(wire_protection),
+            key_changes: changes(media.segments.iter().map(|segment| Some(segment.named)))
+                .map(|(segment, key)| KeyChange {
+                    segment,
+                    key: match key {
+                        hls::NamedKey::Prefetch => NamedKey::Prefetch,
+                        hls::NamedKey::Track => NamedKey::Track,
+                        hls::NamedKey::Other => NamedKey::Other,
+                    },
+                })
+                .collect(),
+            description_changes: changes(
+                shapes
+                    .iter()
+                    .map(|shape| shape.map(|shape| shape.description)),
+            )
+            .map(|(segment, description)| DescriptionChange {
+                segment,
+                description,
+            })
+            .collect(),
+        })),
+    }
+}
+
+/// The fragment the decoder stopped in: counted in frames, because the
+/// playlist's segment durations are rounded and drift across a long track.
+fn failing_fragment(shapes: &[Option<Shape>], decoded_frames: u64) -> Option<usize> {
+    let mut start = 0;
+    for (index, shape) in shapes.iter().enumerate() {
+        let frames = (*shape)?.frames;
+        if decoded_frames < start + frames {
+            return Some(index);
+        }
+        start += frames;
+    }
+    None
+}
+
+/// Each segment where the value differs from the one before, until the first
+/// unknown, at most [`MAX_CHANGES`] of them.
+fn changes<T: Copy + PartialEq>(
+    values: impl Iterator<Item = Option<T>>,
+) -> impl Iterator<Item = (u32, T)> {
+    let mut previous = None;
+    values
+        .map_while(|value| value)
+        .enumerate()
+        .filter_map(move |(index, value)| {
+            let changed = previous != Some(value);
+            previous = Some(value);
+            changed.then_some((u32::try_from(index).ok()?, value))
+        })
+        .take(MAX_CHANGES)
+}
+
+fn wire_protection(protection: Protection) -> fairplay_wire::Protection {
+    let hex = |bytes: &[u8]| bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    fairplay_wire::Protection {
+        key_id: hex(&protection.key_id),
+        iv_size: protection.iv_size,
+        constant_iv: protection
+            .constant_iv
+            .map(|(len, iv)| hex(&iv[..usize::from(len).min(iv.len())])),
+    }
+}
+
+fn wire_config(config: AlacConfig) -> fairplay_wire::AlacConfig {
+    fairplay_wire::AlacConfig {
+        frame_length: config.frame_length,
+        bit_depth: config.bit_depth,
+        channels: config.channels,
+        max_frame_bytes: config.max_frame_bytes,
+        sample_rate: config.sample_rate,
+    }
+}
+
+/// What the feed saw of the file, kept to explain a decoder failure.
+type Seen = std::sync::Mutex<Fed>;
+
+struct Fed {
+    /// Each segment's fragment, once fed.
+    shapes: Vec<Option<Shape>>,
+    configs: [Option<AlacConfig>; 2],
+    protections: [Option<Protection>; 2],
+    /// How old each segment's key context was when it decrypted the fragment.
+    key_ages: Vec<Option<u64>>,
 }
 
 /// The download in progress, dropped to cancel it and close the pipe.
-type Feeding<'a> = Pin<Box<dyn Future<Output = Result<(), Fault>> + Send + 'a>>;
+type Feeding<'a> = Pin<Box<dyn Future<Output = Result<(), PlaybackFault>> + Send + 'a>>;
 
 fn played(format: PcmFormat) -> Reply {
     Reply::Played {
@@ -318,7 +523,7 @@ struct Audio {
 }
 
 impl Audio {
-    fn start(source: PipeReader, start_paused: bool) -> io::Result<Self> {
+    fn start(source: PipeReader, output: Output, start_paused: bool) -> io::Result<Self> {
         let (commands, inbox) = std::sync::mpsc::channel();
         let (report, events) = mpsc::unbounded_channel();
         let (finished, done) = oneshot::channel();
@@ -326,8 +531,12 @@ impl Audio {
             .name("audio".into())
             .spawn(move || {
                 let result = (|| {
-                    let decoder = AlacDecoder::open_fragmented(source)?;
+                    let mut decoder = AlacDecoder::open_fragmented(source)?;
                     let format = decoder.format();
+                    if matches!(output, Output::Discard) {
+                        while decoder.next_block()?.is_some() {}
+                        return Ok(format);
+                    }
                     play_controlled(
                         decoder,
                         Path::new(AUDIO_SOCKET),
@@ -403,6 +612,34 @@ impl Read for PipeReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_failing_fragment_is_the_one_holding_the_next_frame() {
+        let fed = |frames| {
+            Some(Shape {
+                frames,
+                ..Shape::default()
+            })
+        };
+        let shapes = [fed(10), fed(10), fed(10), None];
+        // Exactly two fragments decoded: the next frame is the third's first.
+        assert_eq!(failing_fragment(&shapes, 20), Some(2));
+        assert_eq!(failing_fragment(&shapes, 19), Some(1));
+        assert_eq!(failing_fragment(&shapes, 0), Some(0));
+        // Past everything fed: nothing to name.
+        assert_eq!(failing_fragment(&shapes, 30), None);
+    }
+
+    #[test]
+    fn changes_list_each_new_value_until_the_first_unknown() {
+        let values = [Some(0), Some(0), Some(1), Some(1), Some(2), None, Some(3)];
+        assert_eq!(
+            changes(values.into_iter()).collect::<Vec<_>>(),
+            [(0, 0), (2, 1), (4, 2)]
+        );
+        let many = (0..100).map(Some);
+        assert_eq!(changes(many).count(), MAX_CHANGES);
+    }
 
     #[test]
     fn track_ids_are_catalogue_numbers() {

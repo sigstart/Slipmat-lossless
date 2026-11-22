@@ -228,12 +228,13 @@ For `playTrack { track_id }`:
    read by `slipmat_playback::AlacDecoder`, and play through
    `play_controlled` to `/audio/native`. Decrypted bytes exist only in that
    pipe and the decoder (rule 1). The pipe holds a few fragments, not a track.
-6. **Network.** A read that makes no progress for 30 s is a stall. A stall or
-   a broken-off download resumes with an HTTP `Range` from the start of the
-   top-level box it was in, up to three times, 1 s, 2 s and 3 s apart. Before
-   audio that box is often the first, so this is the Go code's whole-attempt
-   retry; after audio it is the next unread fragment. A CDN that refuses the
-   range fails the track as `stream`.
+6. **Network.** A read that makes no progress for 30 s is a stall. A stall, a
+   broken-off download or a 5xx resumes with an HTTP `Range` from the start of
+   the top-level box it was in, up to three times, 1 s, 2 s and 3 s apart.
+   Before audio that box is often the first, so this is the Go code's
+   whole-attempt retry; after audio it is the next unread fragment. A CDN that
+   ignores the range and answers 200 is read past what was already fed; any
+   other status fails the track as `stream`, with the status in the fault.
 
 The `vendor/adam` loop rewrites `tfdt`, `mfhd` and `TrackID` for VLC and
 ffmpeg. It is not ported: the step 5 fixture decodes to the clear original's
@@ -251,6 +252,8 @@ here.
 | `licenceDenied` arrives before any audio | A refused licence is a user-visible state of its own (rule 4), and the reply already existed. |
 | `commitProfile` / `profileCommitted` / `profilePending` leave the provider protocol | The daemon now holds the profile itself, so the provider never sees them. |
 | The mode is an argument (`sign-in` / `restore`) | It replaces flag-sniffing in `launch.sh`. |
+| `playbackFailed` carries a `fault`, and a `diagnosis` for one that would not decode | "The stream could not be completed" covered a dozen causes. Both are codes and counts, never text from the network or the library. |
+| `checkTrack { track_id }` | Plays a track to nowhere, as fast as it downloads, for `climat check`. |
 
 `Secret` fields keep zeroising their frames as they do today.
 

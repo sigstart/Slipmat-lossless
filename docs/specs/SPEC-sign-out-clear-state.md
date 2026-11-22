@@ -87,6 +87,19 @@ The daemon keeps:
 - Non-account application configuration.
 - Reusable artwork files that are no longer referenced by the model.
 
+### A lost provider is not a sign-out
+
+When the FairPlay provider exits or stops answering without a sign-out, and a
+saved session exists, the daemon restores that session in the background.
+Authorization has not ended: it is the same account, and the catalogue
+credentials stay in use throughout, so none of the state above is cleared.
+
+Recovery ends in one of two ways. A restore that succeeds keeps the queue in
+memory rather than reloading the saved one. A restore that fails, or a
+provider lost a third time within ten minutes, ends authorization, and the
+full cleanup above runs: the next account to sign in might not be this one, so
+nothing from this one may survive for it.
+
 ### Events sent to clients
 
 The daemon publishes enough existing events for every connected client to

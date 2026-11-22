@@ -37,6 +37,11 @@ pub enum Command {
     RemoveFromQueue {
         index: usize,
     },
+    /// Stop whatever is playing and decode this track to nowhere, to see
+    /// whether it plays through. The queue stays where it was.
+    Check {
+        id: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

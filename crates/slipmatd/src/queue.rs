@@ -6,7 +6,7 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use slipmat_core::auth::{PlaybackStage, Reply};
+use slipmat_core::auth::{DecodeStep, PlaybackFault, PlaybackStage, Reply};
 use slipmat_core::ipc::Event;
 use slipmat_core::player::protocol::{
     Command, Event as PlayerEvent, Item, PlaybackState, Queue, QueueChange,
@@ -22,6 +22,14 @@ struct Active {
     stopping: bool,
 }
 
+/// A check holding the provider's playback slot.
+struct Checking {
+    id: String,
+    /// Dropping it stops the check.
+    _control: Sender<PlaybackControl>,
+    events: Receiver<Reply>,
+}
+
 #[derive(Default)]
 struct QueuePlayer {
     items: Vec<Item>,
@@ -29,6 +37,9 @@ struct QueuePlayer {
     occurrence: u64,
     playing: bool,
     active: Option<Active>,
+    /// A check asked for, waiting for the track it stopped to let go.
+    pending_check: Option<String>,
+    checking: Option<Checking>,
 }
 
 pub(super) async fn run(
@@ -53,8 +64,12 @@ pub(super) async fn run(
             reply = receive(&mut player.active), if active_epoch == daemon.queue_epoch.get() => {
                 player.reply(&daemon, reply);
             }
+            reply = receive_check(&mut player.checking) => {
+                player.checked(&daemon, service.as_ref(), reply);
+            }
             _ = tick.tick(), if active_epoch == daemon.queue_epoch.get() && player.playing && player.active.is_none() => {}
         }
+        player.start_check(&daemon, service.as_ref());
         player.start(&daemon, service.as_ref());
     }
 }
@@ -62,6 +77,13 @@ pub(super) async fn run(
 async fn receive(active: &mut Option<Active>) -> Option<Reply> {
     match active {
         Some(active) => active.events.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn receive_check(checking: &mut Option<Checking>) -> Option<Reply> {
+    match checking {
+        Some(checking) => checking.events.recv().await,
         None => std::future::pending().await,
     }
 }
@@ -96,6 +118,7 @@ impl QueuePlayer {
             Command::PlayNext { songs } => self.enqueue(daemon, songs, true),
             Command::PlayLater { songs } => self.enqueue(daemon, songs, false),
             Command::RemoveFromQueue { index } => self.remove(daemon, index),
+            Command::Check { id } => self.check(daemon, id),
             Command::MoveInQueue { from, to } => self.move_item(daemon, from, to),
             Command::ChangeToIndex { index } if index < self.items.len() => {
                 self.select(daemon, index, true);
@@ -111,6 +134,90 @@ impl QueuePlayer {
             Command::PlayPause => self.set_playing(daemon, !self.playing),
             _ => {}
         }
+    }
+
+    /// Stops the track holding the slot, not pausing it: a paused track keeps
+    /// the slot, and the check needs it. The check starts once it is free.
+    fn check(&mut self, daemon: &Daemon, id: String) {
+        if self.pending_check.is_some() || self.checking.is_some() {
+            publish_checked(daemon, id, false, "Another check is running.".into(), None);
+            return;
+        }
+        self.playing = false;
+        if let Some(active) = &mut self.active
+            && !active.stopping
+        {
+            active.stopping = true;
+            let _ = active.control.send(PlaybackControl::Stop);
+        }
+        Self::state(daemon, PlaybackState::Paused);
+        self.pending_check = Some(id);
+    }
+
+    fn start_check(&mut self, daemon: &Daemon, service: Option<&Rc<Service>>) {
+        if self.active.is_some() || self.checking.is_some() {
+            return;
+        }
+        let Some(id) = self.pending_check.take() else {
+            return;
+        };
+        let Some(service) = service else {
+            let outcome = "Playback is unavailable, so nothing can be checked.".into();
+            publish_checked(daemon, id, false, outcome, None);
+            return;
+        };
+        tracing::info!(id, "checking a track");
+        let (control, controls) = mpsc::unbounded_channel();
+        match service.start_check(id.clone(), controls) {
+            Ok(events) => {
+                self.checking = Some(Checking {
+                    id,
+                    _control: control,
+                    events,
+                });
+            }
+            Err(Reply::SignedOut) => {
+                let outcome = "Sign in before checking a track.".into();
+                publish_checked(daemon, id, false, outcome, None);
+            }
+            Err(_) => {
+                let outcome = "The playback worker is busy or unavailable.".into();
+                publish_checked(daemon, id, false, outcome, None);
+            }
+        }
+    }
+
+    fn checked(&mut self, daemon: &Daemon, service: Option<&Rc<Service>>, reply: Option<Reply>) {
+        if reply.is_some_and(Reply::is_playback_update) {
+            return;
+        }
+        let Some(checking) = self.checking.take() else {
+            return;
+        };
+        let (played, outcome) = match reply {
+            Some(Reply::Played {
+                sample_rate,
+                bits_per_sample,
+                channels,
+            }) => (
+                true,
+                format!(
+                    "Played through: {bits_per_sample}-bit, {sample_rate} Hz, {channels} channel(s)."
+                ),
+            ),
+            Some(Reply::PlaybackFailed { stage, fault }) => (false, failure_text(stage, fault)),
+            Some(Reply::LicenceDenied) => {
+                (false, "Apple Music denied the playback licence.".into())
+            }
+            Some(Reply::Stopped) => (false, "The check was stopped.".into()),
+            Some(Reply::SignedOut) => (false, "Signed out during the check.".into()),
+            _ => (false, "The playback worker stopped.".into()),
+        };
+        let detail = service
+            .and_then(|service| service.take_diagnosis())
+            .map(|diagnosis| format!("{diagnosis:?}"));
+        tracing::info!(id = checking.id, played, outcome, ?detail, "check finished");
+        publish_checked(daemon, checking.id, played, outcome, detail);
     }
 
     fn set_playing(&mut self, daemon: &Daemon, playing: bool) {
@@ -231,7 +338,8 @@ impl QueuePlayer {
     }
 
     fn start(&mut self, daemon: &Rc<Daemon>, service: Option<&Rc<Service>>) {
-        if !self.playing || self.active.is_some() {
+        let checking = self.pending_check.is_some() || self.checking.is_some();
+        if !self.playing || self.active.is_some() || checking {
             return;
         }
         let Some(track) = self
@@ -317,26 +425,20 @@ impl QueuePlayer {
                     Some(Reply::LicenceDenied) => {
                         self.fail(daemon, "Apple Music denied the playback licence.")
                     }
-                    Some(Reply::PlaybackFailed { stage }) => {
-                        let detail = match stage {
-                            PlaybackStage::Session => "The session is unavailable.",
-                            PlaybackStage::Storefront => "Apple Music storefront lookup failed.",
-                            PlaybackStage::Catalogue => "Apple Music catalogue lookup failed.",
-                            PlaybackStage::CatalogueAuthorization => {
-                                "Apple Music rejected catalogue authorization."
-                            }
-                            PlaybackStage::CatalogueTrack => {
-                                "Apple Music could not find this track in your storefront."
-                            }
-                            PlaybackStage::CatalogueAsset => {
-                                "Apple Music returned no lossless asset for this track."
-                            }
-                            PlaybackStage::Stream => {
-                                "The FairPlay stream could not be opened or completed."
-                            }
-                            PlaybackStage::Output => "The FairPlay audio output failed.",
+                    Some(Reply::PlaybackFailed { stage, fault }) => {
+                        let (position_ms, duration_ms) = {
+                            let model = daemon.model.borrow();
+                            (model.player.position_ms, model.player.duration_ms)
                         };
-                        self.fail(daemon, detail);
+                        tracing::warn!(
+                            ?stage,
+                            ?fault,
+                            track = ?self.items.get(self.index).and_then(|item| item.catalog_id.as_deref()),
+                            position_ms,
+                            duration_ms,
+                            "playback failed",
+                        );
+                        self.fail(daemon, &failure_text(stage, fault));
                     }
                     _ => self.fail(daemon, "The playback worker stopped."),
                 }
@@ -371,5 +473,150 @@ impl QueuePlayer {
         daemon.publish(Event::PlaybackFailed {
             detail: detail.into(),
         });
+    }
+}
+
+/// The toast for a track the provider could not play: the fault when it named
+/// one, since "the stream could not be completed" covers a dozen causes.
+fn failure_text(stage: PlaybackStage, fault: Option<PlaybackFault>) -> String {
+    let Some(fault) = fault else {
+        return stage_text(stage).to_owned();
+    };
+    match fault {
+        PlaybackFault::Playlist => "The track's HLS playlist could not be loaded.".into(),
+        PlaybackFault::PrefetchKey => "FairPlay would not open the shared prefetch key.".into(),
+        PlaybackFault::Worker => "The FairPlay library stopped responding.".into(),
+        PlaybackFault::Stalled => "The download stalled and could not be resumed.".into(),
+        PlaybackFault::Dropped => "The download broke off and could not be resumed.".into(),
+        PlaybackFault::Refused {
+            status,
+            resume: true,
+        } => format!("Apple's CDN refused to resume the download (HTTP {status})."),
+        PlaybackFault::Refused {
+            status,
+            resume: false,
+        } => format!("Apple's CDN refused the download (HTTP {status})."),
+        PlaybackFault::Container => "The track's file was not in the expected format.".into(),
+        PlaybackFault::KeyReopen => {
+            "The track's key expired during playback and could not be renewed.".into()
+        }
+        PlaybackFault::Decrypt { status } => {
+            format!("FairPlay could not decrypt part of the track (status {status}).")
+        }
+        PlaybackFault::Decoder {
+            step,
+            decoded_ms,
+            ignored_keys,
+            first_ignored_at_ms,
+            ..
+        } => {
+            let at = decoded_ms.map_or_else(String::new, |ms| format!(" at {}", clock(ms)));
+            let what = match step {
+                Some(DecodeStep::Container) => format!("The track's file could not be read{at}."),
+                Some(DecodeStep::Audio) => format!("The track's audio could not be decoded{at}."),
+                Some(DecodeStep::EndedEarly) => format!("The track's audio ended early{at}."),
+                None => "The decrypted audio could not be decoded.".to_owned(),
+            };
+            if ignored_keys == 0 {
+                return what;
+            }
+            format!(
+                "{what} The track changes key {ignored_keys} time(s), first at {}, and \
+                 Slipmat does not follow key changes.",
+                first_ignored_at_ms.map_or_else(|| "an unknown point".to_owned(), clock)
+            )
+        }
+        PlaybackFault::AudioServer => "The audio server stopped the stream.".into(),
+    }
+}
+
+fn publish_checked(
+    daemon: &Daemon,
+    id: String,
+    played: bool,
+    outcome: String,
+    detail: Option<String>,
+) {
+    daemon.publish(Event::Checked {
+        id,
+        played,
+        outcome,
+        detail,
+    });
+}
+
+/// `m:ss`, the way the Now Playing clock shows it.
+fn clock(ms: u64) -> String {
+    let seconds = ms / 1000;
+    format!("{}:{:02}", seconds / 60, seconds % 60)
+}
+
+fn stage_text(stage: PlaybackStage) -> &'static str {
+    match stage {
+        PlaybackStage::Session => "The session is unavailable.",
+        PlaybackStage::Storefront => "Apple Music storefront lookup failed.",
+        PlaybackStage::Catalogue => "Apple Music catalogue lookup failed.",
+        PlaybackStage::CatalogueAuthorization => "Apple Music rejected catalogue authorization.",
+        PlaybackStage::CatalogueTrack => {
+            "Apple Music could not find this track in your storefront."
+        }
+        PlaybackStage::CatalogueAsset => "Apple Music returned no lossless asset for this track.",
+        PlaybackStage::Stream => "The FairPlay stream could not be opened or completed.",
+        PlaybackStage::Output => "The FairPlay audio output failed.",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_named_fault_replaces_the_stage_in_the_toast() {
+        assert_eq!(
+            failure_text(PlaybackStage::Stream, None),
+            "The FairPlay stream could not be opened or completed."
+        );
+        assert_eq!(
+            failure_text(
+                PlaybackStage::Stream,
+                Some(PlaybackFault::Refused {
+                    status: 403,
+                    resume: true
+                })
+            ),
+            "Apple's CDN refused to resume the download (HTTP 403)."
+        );
+        assert_eq!(
+            failure_text(
+                PlaybackStage::Stream,
+                Some(PlaybackFault::Decrypt { status: -2 })
+            ),
+            "FairPlay could not decrypt part of the track (status -2)."
+        );
+        assert_eq!(
+            failure_text(
+                PlaybackStage::Output,
+                Some(PlaybackFault::Decoder {
+                    step: Some(DecodeStep::Audio),
+                    decoded_ms: Some(987_012),
+                    ignored_keys: 2,
+                    first_ignored_at_ms: Some(986_000)
+                })
+            ),
+            "The track's audio could not be decoded at 16:27. The track changes key 2 \
+             time(s), first at 16:26, and Slipmat does not follow key changes."
+        );
+        assert_eq!(
+            failure_text(
+                PlaybackStage::Output,
+                Some(PlaybackFault::Decoder {
+                    step: None,
+                    decoded_ms: None,
+                    ignored_keys: 0,
+                    first_ignored_at_ms: None
+                })
+            ),
+            "The decrypted audio could not be decoded."
+        );
     }
 }

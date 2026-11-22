@@ -404,6 +404,15 @@ fn sync_catalogue(daemon: &Rc<Daemon>) {
         model.library = Library::default();
     }
     drop(model);
+    if daemon
+        .auth
+        .as_ref()
+        .is_some_and(|service| service.take_gave_up())
+    {
+        daemon.publish(Event::Error {
+            detail: "The playback engine keeps stopping. Sign in again to restart it.".into(),
+        });
+    }
     if ended {
         clear_playback(daemon);
     } else if restored {
@@ -525,6 +534,18 @@ fn answer(
             daemon.send(Command::ChangeToIndex { index });
             None
         }
+        // Answered by a broadcast when it ends: a check takes as long as the
+        // download, and the queue worker is what owns the slot it needs.
+        Request::Check { id } if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) => {
+            daemon.send(Command::Check { id });
+            None
+        }
+        Request::Check { id } => Some(Event::Checked {
+            id,
+            played: false,
+            outcome: "That is not an Apple Music catalogue id.".into(),
+            detail: None,
+        }),
         Request::Browse {
             view,
             query,

@@ -176,6 +176,13 @@ pub enum Request {
     #[serde(rename = "signOut")]
     SignOut,
 
+    /// Stop playback and decode one track to nowhere, as fast as it
+    /// downloads, to find out whether it plays through. Answered by
+    /// [`Event::Checked`]. A debugging tool: the track playing restarts
+    /// from its beginning afterwards, because the provider cannot seek.
+    #[serde(rename = "check")]
+    Check { id: String },
+
     /// A page of the library. `query` filters, `offset`/`limit` window it —
     /// a client draws a screenful, not 535 rows.
     #[serde(rename = "browse")]
@@ -510,6 +517,16 @@ pub enum Event {
     /// browsing error cannot, so a client may say it louder.
     #[serde(rename = "playbackFailed")]
     PlaybackFailed { detail: String },
+
+    /// How a [`Request::Check`] ended. `detail` is what the provider saw of a
+    /// file that would not decode: codes and counts, nothing secret.
+    #[serde(rename = "checked")]
+    Checked {
+        id: String,
+        played: bool,
+        outcome: String,
+        detail: Option<String>,
+    },
 }
 
 /// One row of the queue.

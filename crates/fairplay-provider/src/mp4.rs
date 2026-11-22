@@ -222,6 +222,32 @@ pub struct Track {
     pub id: u32,
     pub iv_size: u8,
     pub default_sample_size: u32,
+    pub default_sample_duration: u32,
+    /// Both sample descriptions' ALAC settings. Only the first is kept in the
+    /// clear init segment, so these explain a fragment that names the second.
+    pub configs: [Option<AlacConfig>; 2],
+    /// And how each is encrypted, likewise.
+    pub protections: [Option<Protection>; 2],
+}
+
+/// A sample description's `tenc`: which key, and how the IV is found. Key ids
+/// and IVs are in the file in the clear; the key itself never is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Protection {
+    pub key_id: [u8; 16],
+    /// Bytes of IV per sample in `senc`, or 0 for one constant IV.
+    pub iv_size: u8,
+    pub constant_iv: Option<(u8, [u8; 16])>,
+}
+
+/// The parts of an ALAC magic cookie that decide whether a frame decodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AlacConfig {
+    pub frame_length: u32,
+    pub bit_depth: u8,
+    pub channels: u8,
+    pub max_frame_bytes: u32,
+    pub sample_rate: u32,
 }
 
 /// Rewrites `moov` as a clear init segment, returned with `ftyp` before it.
@@ -248,14 +274,14 @@ pub fn clear_init(ftyp: Option<&[u8]>, moov: &[u8]) -> Result<(Vec<u8>, Track)> 
         .child_mut(b"stbl")?;
     stbl.children_mut()?
         .retain(|child| !is_encryption_group(child));
-    let iv_size = clear_sample_entry(stbl.child_mut(b"stsd")?)?;
+    let (iv_size, (configs, protections)) = clear_sample_entry(stbl.child_mut(b"stsd")?)?;
 
-    let default_sample_size = match moov.child(b"mvex") {
-        Some(mvex) => trex_default_size(mvex, id)?,
+    let (default_sample_duration, default_sample_size) = match moov.child(b"mvex") {
+        Some(mvex) => trex_defaults(mvex, id)?,
         None => {
             moov.children_mut()?
                 .push(Node::container(*b"mvex", vec![trex(id)]));
-            0
+            (TREX_DURATION, 0)
         }
     };
 
@@ -267,6 +293,9 @@ pub fn clear_init(ftyp: Option<&[u8]>, moov: &[u8]) -> Result<(Vec<u8>, Track)> 
             id,
             iv_size,
             default_sample_size,
+            default_sample_duration,
+            configs,
+            protections,
         },
     ))
 }
@@ -286,8 +315,12 @@ fn is_encryption_group(node: &Node) -> bool {
         && matches!(node.bytes().get(4..8), Some(b"seig" | b"seam"))
 }
 
-/// Keeps one sample entry, made clear. Returns the per-sample IV size.
-fn clear_sample_entry(stsd: &mut Node) -> Result<u8> {
+/// Every entry's ALAC settings and encryption, for explaining a failure.
+type Described = ([Option<AlacConfig>; 2], [Option<Protection>; 2]);
+
+/// Keeps one sample entry, made clear. Returns the per-sample IV size and
+/// what every entry said.
+fn clear_sample_entry(stsd: &mut Node) -> Result<(u8, Described)> {
     let entries = stsd.children_mut()?;
     match entries.as_slice() {
         [_] => {}
@@ -295,6 +328,14 @@ fn clear_sample_entry(stsd: &mut Node) -> Result<u8> {
         [_, _] => bail!("MP4 sample entries differ in format"),
         _ => bail!("expected one or two MP4 sample entries"),
     }
+    let configs = [
+        entries.first().and_then(alac_config),
+        entries.get(1).and_then(alac_config),
+    ];
+    let protections = [
+        entries.first().and_then(protection),
+        entries.get(1).and_then(protection),
+    ];
     entries.truncate(1);
     let entry = &mut entries[0];
     let sinf_at = entry
@@ -318,7 +359,46 @@ fn clear_sample_entry(stsd: &mut Node) -> Result<u8> {
         .get_mut(4..8)
         .context("truncated stsd")?
         .copy_from_slice(&1u32.to_be_bytes());
-    Ok(iv_size)
+    Ok((iv_size, (configs, protections)))
+}
+
+/// An entry's `tenc`: full-box header, two reserved or pattern bytes, the
+/// protected flag, the IV size, the key id, then a constant IV if the IV size
+/// is 0.
+fn protection(entry: &Node) -> Option<Protection> {
+    let tenc = entry
+        .child(b"sinf")?
+        .child(b"schi")?
+        .child(b"tenc")?
+        .bytes();
+    let iv_size = *tenc.get(7)?;
+    let constant_iv = if *tenc.get(6)? == 1 && iv_size == 0 {
+        let len = *tenc.get(24)?;
+        let mut iv = [0; 16];
+        let bytes = tenc.get(25..25 + usize::from(len))?;
+        iv.get_mut(..bytes.len())?.copy_from_slice(bytes);
+        Some((len, iv))
+    } else {
+        None
+    };
+    Some(Protection {
+        key_id: tenc.get(8..24)?.try_into().ok()?,
+        iv_size,
+        constant_iv,
+    })
+}
+
+/// An entry's `alac` box: a full-box header, then the 24-byte magic cookie.
+fn alac_config(entry: &Node) -> Option<AlacConfig> {
+    let cookie = entry.child(b"alac")?.bytes().get(4..28)?;
+    let u32_at = |at: usize| Some(u32::from_be_bytes(cookie.get(at..at + 4)?.try_into().ok()?));
+    Some(AlacConfig {
+        frame_length: u32_at(0)?,
+        bit_depth: cookie[5],
+        channels: cookie[9],
+        max_frame_bytes: u32_at(12)?,
+        sample_rate: u32_at(20)?,
+    })
 }
 
 /// The per-sample IV size, after refusing pattern encryption: ALAC protects
@@ -331,21 +411,25 @@ fn tenc_iv_size(tenc: &[u8]) -> Result<u8> {
     Ok(tenc[7])
 }
 
-fn trex_default_size(mvex: &Node, id: u32) -> Result<u32> {
+/// The track's default sample duration and size.
+fn trex_defaults(mvex: &Node, id: u32) -> Result<(u32, u32)> {
     let Body::Children(children) = &mvex.body else {
         bail!("invalid mvex");
     };
     for trex in children.iter().filter(|child| &child.kind == b"trex") {
         if read_u32(trex.bytes(), 4)? == id {
-            return read_u32(trex.bytes(), 16);
+            return Ok((read_u32(trex.bytes(), 12)?, read_u32(trex.bytes(), 16)?));
         }
     }
     bail!("mvex has no trex for the track")
 }
 
+/// ALAC's frame length, used when the file has no `trex` to say otherwise.
+const TREX_DURATION: u32 = 4096;
+
 fn trex(id: u32) -> Node {
     let mut payload = vec![0; 4];
-    for field in [id, 1, 4096, 0, 0] {
+    for field in [id, 1, TREX_DURATION, 0, 0] {
         payload.extend_from_slice(&field.to_be_bytes());
     }
     Node::opaque(*b"trex", payload)
@@ -404,6 +488,22 @@ const DEFAULT_BASE_IS_MOOF: u32 = 0x2_0000;
 pub struct Fragment {
     pub bytes: Vec<u8>,
     pub protected: Vec<Range<usize>>,
+    pub shape: Shape,
+}
+
+/// How a fragment was laid out and encrypted, kept to explain one that fails.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Shape {
+    pub samples: u32,
+    /// Its samples' total duration, in the track's timescale.
+    pub frames: u64,
+    /// Samples encrypted in more than one piece.
+    pub split_samples: u32,
+    pub tfhd_flags: u32,
+    /// Every `trun` box's flags, combined.
+    pub trun_flags: u32,
+    /// The sample description it names, or 0 for the track's default.
+    pub description: u32,
 }
 
 /// Joins a `moof` read at `moof_at` with its `mdat`, finds the protected
@@ -419,6 +519,7 @@ pub fn fragment(
     let mdat_header = header(mdat)?.context("truncated mdat")?;
     let data = moof.len() + mdat_header.header_len..moof.len() + mdat.len();
     let mut protected = Vec::new();
+    let mut shape = Shape::default();
     let mut base_offsets = Vec::new();
     let mut traf_end = 0;
     for (kind, traf, header_len) in children(&moof[moof_header.header_len..])? {
@@ -429,6 +530,12 @@ pub fn fragment(
         let samples = traf_samples(&traf[header_len..], track, moof_at, traf_end, &data)?;
         traf_end = samples.data_end;
         protected.extend(samples.protected);
+        shape.samples += samples.shape.samples;
+        shape.frames += samples.shape.frames;
+        shape.description = shape.description.max(samples.shape.description);
+        shape.split_samples += samples.shape.split_samples;
+        shape.tfhd_flags |= samples.shape.tfhd_flags;
+        shape.trun_flags |= samples.shape.trun_flags;
         if let Some(field) = samples.base_data_offset {
             base_offsets.push(traf_at + header_len + field);
         }
@@ -445,6 +552,7 @@ pub fn fragment(
     Ok(Fragment {
         bytes: moof,
         protected,
+        shape,
     })
 }
 
@@ -458,6 +566,7 @@ struct TrafSamples {
     data_end: usize,
     /// The `base_data_offset` field's position in the traf payload.
     base_data_offset: Option<usize>,
+    shape: Shape,
 }
 
 /// One track fragment's sample positions, relative to the moof's start, and
@@ -476,6 +585,10 @@ fn traf_samples(
         .context("traf has no tfhd")?;
     let mut fields = Fields::new(&tfhd[*tfhd_header..]);
     let flags = fields.u32()? & 0x00ff_ffff;
+    let mut shape = Shape {
+        tfhd_flags: flags,
+        ..Shape::default()
+    };
     ensure!(fields.u32()? == track.id, "MP4 fragment for another track");
     let base_field = offset_in(traf, tfhd) + tfhd_header + fields.at;
     let base = if flags & BASE_DATA_OFFSET != 0 {
@@ -490,8 +603,14 @@ fn traf_samples(
     } else {
         previous_end
     };
-    fields.skip_if(flags & 0x2 != 0, 4)?;
-    fields.skip_if(flags & 0x8 != 0, 4)?;
+    if flags & 0x2 != 0 {
+        shape.description = fields.u32()?;
+    }
+    let default_duration = if flags & 0x8 != 0 {
+        fields.u32()?
+    } else {
+        track.default_sample_duration
+    };
     let default_size = if flags & 0x10 != 0 {
         fields.u32()?
     } else {
@@ -509,8 +628,10 @@ fn traf_samples(
     for (_, trun, header_len) in boxes.iter().filter(|(kind, ..)| kind == b"trun") {
         let mut fields = Fields::new(&trun[*header_len..]);
         let flags = fields.u32()? & 0x00ff_ffff;
+        shape.trun_flags |= flags;
         let count = fields.u32()?;
         ensure!(count <= MAX_SAMPLES, "too many MP4 samples");
+        shape.samples += count;
         if flags & 0x1 != 0 {
             let offset = i64::from(i32::from_be_bytes(fields.take(4)?.try_into()?));
             position =
@@ -518,7 +639,12 @@ fn traf_samples(
         }
         fields.skip_if(flags & 0x4 != 0, 4)?;
         for _ in 0..count {
-            fields.skip_if(flags & 0x100 != 0, 4)?;
+            let duration = if flags & 0x100 != 0 {
+                fields.u32()?
+            } else {
+                default_duration
+            };
+            shape.frames += u64::from(duration);
             let size = if flags & 0x200 != 0 {
                 fields.u32()?
             } else {
@@ -531,7 +657,9 @@ fn traf_samples(
                 sample.start >= data.start && sample.end <= data.end,
                 "MP4 sample outside its mdat"
             );
-            subsamples.protect(sample.clone(), &mut protected)?;
+            if subsamples.protect(sample.clone(), &mut protected)? > 1 {
+                shape.split_samples += 1;
+            }
             position = sample.end;
         }
     }
@@ -539,6 +667,7 @@ fn traf_samples(
         protected,
         data_end: position,
         base_data_offset: (flags & BASE_DATA_OFFSET != 0).then_some(base_field),
+        shape,
     })
 }
 
@@ -563,17 +692,19 @@ impl<'a> Senc<'a> {
         })
     }
 
-    /// Adds the protected parts of the next sample, which occupies `sample`.
-    fn protect(&mut self, sample: Range<usize>, out: &mut Vec<Range<usize>>) -> Result<()> {
+    /// Adds the protected parts of the next sample, which occupies `sample`,
+    /// and says how many pieces it was encrypted in.
+    fn protect(&mut self, sample: Range<usize>, out: &mut Vec<Range<usize>>) -> Result<u16> {
         ensure!(self.remaining > 0, "senc has fewer entries than samples");
         self.remaining -= 1;
         self.fields.take(self.iv_size)?;
         if !self.has_subsamples {
             out.extend(blocks(sample.clone()));
-            return Ok(());
+            return Ok(1);
         }
         let mut at = sample.start;
-        for _ in 0..self.fields.u16()? {
+        let pieces = self.fields.u16()?;
+        for _ in 0..pieces {
             let clear = usize::from(self.fields.u16()?);
             let protected = usize::try_from(self.fields.u32()?)?;
             let start = at + clear;
@@ -585,7 +716,7 @@ impl<'a> Senc<'a> {
             out.extend(blocks(start..end));
             at = end;
         }
-        Ok(())
+        Ok(pieces)
     }
 }
 
@@ -785,6 +916,9 @@ pub mod tests {
             id: 1,
             iv_size: 0,
             default_sample_size: 0,
+            default_sample_duration: TREX_DURATION,
+            configs: [None; 2],
+            protections: [None; 2],
         }
     }
 

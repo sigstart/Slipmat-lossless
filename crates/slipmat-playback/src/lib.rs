@@ -16,7 +16,7 @@ use std::{
     },
 };
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use symphonia::{
     core::{
         audio::{Audio, GenericAudioBufferRef},
@@ -29,6 +29,39 @@ use symphonia::{
 
 use fragmented::FragmentedM4a;
 pub use symphonia::core::io::MediaSource;
+
+/// Context on an error from the ALAC stream rather than from the audio server,
+/// so a caller can tell the two apart with `downcast_ref`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Undecodable {
+    pub step: DecodeStep,
+    /// Audio decoded before the failure: where in the track it happened, which
+    /// the playback clock only approximates from behind the output buffer.
+    pub decoded_ms: u64,
+    /// The same, exactly, in sample frames.
+    pub decoded_frames: u64,
+}
+
+/// Which part of decoding failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecodeStep {
+    /// The MP4 around the audio could not be read.
+    Container,
+    /// An ALAC frame did not decode.
+    Audio,
+    /// The demuxer ran out of audio before the stream ended.
+    EndedEarly,
+}
+
+impl std::fmt::Display for Undecodable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the ALAC stream did not decode ({:?} after {} ms)",
+            self.step, self.decoded_ms
+        )
+    }
+}
 
 /// The source PCM format, before any output conversion.
 
@@ -48,6 +81,7 @@ pub struct AlacDecoder {
     samples: Vec<i32>,
     finished: bool,
     source_eof: Option<Arc<AtomicBool>>,
+    frames_decoded: u64,
 }
 
 impl AlacDecoder {
@@ -92,6 +126,7 @@ impl AlacDecoder {
             samples: Vec::new(),
             finished: false,
             source_eof: None,
+            frames_decoded: 0,
         })
     }
 
@@ -100,9 +135,22 @@ impl AlacDecoder {
     pub fn open_fragmented(source: impl Read + Send + Sync + 'static) -> Result<Self> {
         let eof = Arc::new(AtomicBool::new(false));
         let source = FragmentedM4a::new(source, Arc::clone(&eof));
-        let mut decoder = Self::open(Box::new(ReadOnlySource::new(source)))?;
+        let mut decoder =
+            Self::open(Box::new(ReadOnlySource::new(source))).context(Undecodable {
+                step: DecodeStep::Container,
+                decoded_ms: 0,
+                decoded_frames: 0,
+            })?;
         decoder.source_eof = Some(eof);
         Ok(decoder)
+    }
+
+    fn undecodable(&self, step: DecodeStep) -> Undecodable {
+        Undecodable {
+            step,
+            decoded_ms: self.frames_decoded * 1000 / u64::from(self.format.sample_rate.max(1)),
+            decoded_frames: self.frames_decoded,
+        }
     }
 
     pub fn format(&self) -> PcmFormat {
@@ -128,22 +176,37 @@ impl AlacDecoder {
     }
 
     fn decode_next(&mut self) -> Result<bool> {
-        while let Some(packet) = self.reader.next_packet().context("reading MP4 packet")? {
+        loop {
+            let container = self.undecodable(DecodeStep::Container);
+            let Some(packet) = self
+                .reader
+                .next_packet()
+                .context("reading MP4 packet")
+                .context(container)?
+            else {
+                break;
+            };
             if packet.track_id != self.track_id {
                 continue;
             }
 
+            let audio_failed = self.undecodable(DecodeStep::Audio);
             let GenericAudioBufferRef::S32(audio) = self
                 .decoder
                 .decode(&packet)
-                .context("decoding ALAC packet")?
+                .context("decoding ALAC packet")
+                .context(audio_failed)?
             else {
-                bail!("ALAC decoder returned an unexpected sample format");
+                return Err(
+                    anyhow::anyhow!("ALAC decoder returned an unexpected sample format")
+                        .context(audio_failed),
+                );
             };
             if audio.frames() == 0 {
                 continue;
             }
 
+            self.frames_decoded += audio.frames() as u64;
             audio.copy_to_vec_interleaved(&mut self.samples);
             // Symphonia left-aligns ALAC samples in i32. Undo that shift without
             // rescaling or converting through floating point.
@@ -153,11 +216,13 @@ impl AlacDecoder {
             }
             return Ok(true);
         }
-        if let Some(eof) = &self.source_eof {
-            ensure!(
-                eof.load(Ordering::Relaxed),
+        if let Some(eof) = &self.source_eof
+            && !eof.load(Ordering::Relaxed)
+        {
+            return Err(anyhow::anyhow!(
                 "MP4 demuxer stopped before a complete fragmented stream reached EOF"
-            );
+            )
+            .context(self.undecodable(DecodeStep::EndedEarly)));
         }
         Ok(false)
     }

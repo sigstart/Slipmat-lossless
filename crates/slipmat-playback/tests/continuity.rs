@@ -3,7 +3,7 @@
 
 use std::io::{self, Cursor, Read};
 
-use slipmat_playback::{AlacDecoder, PcmFormat};
+use slipmat_playback::{AlacDecoder, DecodeStep, PcmFormat, Undecodable};
 
 const STEREO_16: &[u8] = include_bytes!("fixtures/stereo-16.m4a");
 const STEREO_16_NEXT: &[u8] = include_bytes!("fixtures/stereo-16-next.m4a");
@@ -157,10 +157,50 @@ fn rejects_truncated_fragmented_streams() {
             match decoder.next_block() {
                 Ok(Some(_)) => {}
                 Ok(None) => panic!("truncated fragmented media returned clean EOF"),
-                Err(_) => break,
+                Err(error) => {
+                    assert!(error.downcast_ref::<Undecodable>().is_some(), "{error:#}");
+                    break;
+                }
             }
         }
     }
+}
+
+/// What a wrongly decrypted fragment looks like to the decoder: valid boxes,
+/// audio that is noise. It must say so, and how far it got first.
+#[test]
+fn a_corrupt_frame_is_an_audio_failure_after_the_audio_before_it() {
+    let last_mdat = STEREO_16_FRAGMENTED
+        .windows(4)
+        .rposition(|kind| kind == b"mdat")
+        .unwrap()
+        + 4;
+    let mut input = STEREO_16_FRAGMENTED.to_vec();
+    // 0x40 opens each frame with a CCE element, which ALAC refuses. Not 0xff:
+    // that is the end tag, and decodes silently to empty frames.
+    for byte in &mut input[last_mdat..] {
+        *byte = 0x40;
+    }
+    let mut decoder = AlacDecoder::open_fragmented(Cursor::new(input)).unwrap();
+    let error = loop {
+        match decoder.next_block() {
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("noise decoded as audio"),
+            Err(error) => break error,
+        }
+    };
+    let failed = error.downcast_ref::<Undecodable>().copied();
+    assert!(
+        matches!(
+            failed,
+            Some(Undecodable {
+                step: DecodeStep::Audio,
+                decoded_ms,
+                decoded_frames
+            }) if decoded_ms > 0 && decoded_frames > 0
+        ),
+        "{failed:?}: {error:#}"
+    );
 }
 
 /// The provider opens the decoder before the audio output, so input that is

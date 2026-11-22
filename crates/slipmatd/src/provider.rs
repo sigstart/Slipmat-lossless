@@ -16,8 +16,9 @@ use fairplay_wire::{Catalogue, Reply as ProviderReply, Request as ProviderReques
 use slipmat_core::auth::Reply;
 use slipmat_core::auth_wire::{self as wire, Reader, Request};
 use slipmat_core::player::protocol::Tokens;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 
@@ -71,6 +72,8 @@ pub(crate) struct Provider {
     pub(crate) child: Child,
     pub(crate) input: ChildStdin,
     pub(crate) output: Reader<ChildStdout>,
+    /// What the provider saw of the last track that would not decode.
+    pub(crate) diagnosis: Option<Box<fairplay_wire::Diagnosis>>,
 }
 
 impl Provider {
@@ -87,7 +90,7 @@ impl Provider {
             .env_clear()
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .process_group(0)
             .kill_on_drop(true);
         if let Some(profile) = &profile {
@@ -114,6 +117,9 @@ impl Provider {
             });
         }
         let mut child = command.spawn()?;
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(forward_native_log(stderr));
+        }
         let missing_pipe = || io::Error::other("FairPlay provider pipe unavailable");
         let input = child.stdin.take().ok_or_else(missing_pipe)?;
         let output = Reader::new(child.stdout.take().ok_or_else(missing_pipe)?);
@@ -123,6 +129,7 @@ impl Provider {
             child,
             input,
             output,
+            diagnosis: None,
         })
     }
 
@@ -158,14 +165,15 @@ impl Provider {
         }
     }
 
+    /// Runs one track, played or checked, until it ends.
     pub(crate) async fn play_track(
         &mut self,
-        track_id: String,
+        request: ProviderRequest,
         mut controls: mpsc::UnboundedReceiver<PlaybackControl>,
         events: &mpsc::UnboundedSender<Reply>,
     ) -> Option<Reply> {
-        self.send_control(ProviderRequest::PlayTrack { track_id })
-            .await?;
+        self.diagnosis = None;
+        self.send_control(request).await?;
         let mut stop_deadline = None;
         loop {
             let control = tokio::select! {
@@ -177,7 +185,15 @@ impl Provider {
                     }
                 } => return None,
                 frame = self.output.frame::<ProviderReply>() => {
-                    match Reply::from(frame.ok()??) {
+                    let mut frame = frame.ok()??;
+                    // Kept here: the reply the queue sees carries the fault, not this.
+                    if let ProviderReply::PlaybackFailed { diagnosis, .. } = &mut frame
+                        && let Some(diagnosis) = diagnosis.take()
+                    {
+                        tracing::warn!(?diagnosis, "what the provider saw of the failing file");
+                        self.diagnosis = Some(diagnosis);
+                    }
+                    match Reply::from(frame) {
                         reply if reply.is_playback_update() => {
                             let _ = events.send(reply);
                             continue;
@@ -292,6 +308,59 @@ impl Drop for Provider {
     }
 }
 
+/// Lines the DRM wrapper writes itself, by prefix: its lease, recovery and key
+/// context reports, whose formats carry fixed words, numbers and catalogue ids.
+/// Apple's own code shares the stream and is free text that has not been read,
+/// so everything else is dropped rather than risk a credential in the log.
+const NATIVE_LOG: [&str; 7] = [
+    "[recovery] ",
+    "[.] LEASE_END ",
+    "[.] PLAYBACK_ERROR",
+    "[!] refreshed context",
+    "[hybris] wrapper state: ",
+    "[hybris] key context ",
+    "[guard] ",
+];
+
+/// Longer than any line the wrapper writes; a longer one is not one of them.
+const NATIVE_LINE: u64 = 512;
+
+/// Reads the provider's stderr to its end, so it can never fill and stall the
+/// provider, logging only the wrapper's own lines.
+async fn forward_native_log(stderr: ChildStderr) {
+    let mut reader = BufReader::new(stderr);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match (&mut reader)
+            .take(NATIVE_LINE)
+            .read_until(b'\n', &mut line)
+            .await
+        {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
+        if line.last() != Some(&b'\n') {
+            // Too long: skip the rest of it rather than read it as new lines.
+            let mut rest = Vec::new();
+            if reader.read_until(b'\n', &mut rest).await.is_err() {
+                return;
+            }
+            continue;
+        }
+        if let Some(line) = native_line(&String::from_utf8_lossy(&line)) {
+            tracing::info!(target: "slipmatd::fairplay", "{line}");
+        }
+    }
+}
+
+fn native_line(line: &str) -> Option<String> {
+    NATIVE_LOG
+        .iter()
+        .any(|prefix| line.starts_with(prefix))
+        .then(|| line.chars().filter(|c| !c.is_control()).collect())
+}
+
 /// Only a catalogue the daemon can use counts as signed in.
 fn tokens(catalogue: Catalogue) -> io::Result<Tokens> {
     let Catalogue {
@@ -333,4 +402,34 @@ pub(crate) async fn send_before(
         wire::write(write, reply),
     )
     .await?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_wrappers_own_lines_are_logged() {
+        for line in [
+            "[.] LEASE_END code=3084 — scheduling async recovery\n",
+            "[recovery] STATE=Running — REFRESH_SUCCESS\n",
+            "[hybris] wrapper state: RUNNING\n",
+            "[!] refreshed context\n",
+        ] {
+            assert_eq!(native_line(line).as_deref(), Some(line.trim_end()));
+        }
+        for line in [
+            "[SVPlaybackLease] token=secret-value\n",
+            "Music-User-Token: secret-value\n",
+            "[!] catched an exception: whatever Apple said\n",
+            "",
+        ] {
+            assert_eq!(native_line(line), None, "{line}");
+        }
+        // A line cannot forge a second one in the log.
+        assert_eq!(
+            native_line("[recovery] a\r\x1b[2Kfake\n").as_deref(),
+            Some("[recovery] a[2Kfake")
+        );
+    }
 }
