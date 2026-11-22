@@ -663,13 +663,13 @@ impl Client {
 
     /// The album and artist a **catalog** song belongs to.
     ///
-    /// Exists because a queue item is not a `Track`: MusicKit reports a title,
+    /// Exists because a queue item is not a `Track`: it carries a title,
     /// an artist name and an album name, and no ids for either. So walking from
     /// a queue row to its album page needs one lookup, which is why it happens
     /// on a menu click rather than for every row.
     ///
     /// Catalog only, and that is safe here rather than lucky: a queue is loaded
-    /// by `setQueue` from catalog ids, so a queue item's id is always one.
+    /// from catalog ids, so a queue item's id is always one.
     /// Either relationship may be absent, and `None` is a real answer — a
     /// single that belongs to no album is not an error.
     pub async fn song_containers(&self, id: &str) -> Result<(Option<String>, Option<String>)> {

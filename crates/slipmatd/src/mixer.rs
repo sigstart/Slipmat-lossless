@@ -3,12 +3,10 @@
 
 //! Volume, where the rest of the desktop keeps it.
 //!
-//! **Not MusicKit's.** The player has a volume of its own, and driving that
-//! left two independent gains for one application: Slipmat's slider said 50%
-//! while the system mixer said 100%, they multiplied, and only one of them was
-//! where a Linux user goes to look. This drives the *stream* instead — the
-//! sink-input the FairPlay player is using — so Slipmat's volume and the one
-//! in the desktop's audio panel are the same number.
+//! **No gain of our own.** Two independent gains for one application multiply,
+//! and only one of them is where a Linux user goes to look. This drives the
+//! *stream* — the sink-input the FairPlay provider is using — so Slipmat's
+//! volume and the one in the desktop's audio panel are the same number.
 //!
 //! **Persistence is the audio server's job, not ours.** The stream disappears
 //! whenever playback stops for a while, which would otherwise mean tracking a
@@ -223,7 +221,7 @@ fn read(main: &mut Mainloop, ctx: &Context) -> Option<f64> {
     })
 }
 
-/// The sink-input's index and channel count, if the sidecar has one.
+/// The sink-input's index and channel count, if the provider has one.
 fn find(main: &mut Mainloop, ctx: &Context) -> Option<(u32, u8)> {
     ask(main, ctx, |info| Some((info.index, info.channel_map.len())))
 }

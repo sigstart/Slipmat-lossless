@@ -4,9 +4,9 @@
 //! Turning a click into a request.
 //!
 //! **Most of what used to be here is gone**, and that is the point of the
-//! split. Building the queue, healing one MusicKit refused, verifying it opened
-//! on the right track, remembering dead ids, saving the session — all of it
-//! belonged to whoever holds the sidecar, and none of it belonged twice. What
+//! split. Building the queue, verifying it opened on the right track,
+//! remembering dead ids, saving the session — all of it belongs to the daemon,
+//! and none of it belonged twice. What
 //! is left is the part that is genuinely this client's: which rows the person
 //! is looking at, and which one they clicked.
 
@@ -69,10 +69,8 @@ impl AppModel {
             return;
         }
         if self.mirror.queue.is_empty() {
-            // Nothing to insert into: `playNext` on an empty queue is a
-            // silent no-op in MusicKit. Start the queue instead — "add to
-            // queue" with no queue plainly means "make one", and refusing
-            // was a worse answer than doing it.
+            // Nothing to insert into. Start the queue instead — "add to
+            // queue" with no queue plainly means "make one".
             tracing::info!(count = ids.len(), "starting a queue");
             self.ask(Request::Play {
                 ids,

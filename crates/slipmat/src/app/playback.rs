@@ -5,7 +5,7 @@
 //! MPRIS, to the notification, and to the cover on disk.
 //!
 //! Everything here is downstream of `PlayerState`, which is a projection of the
-//! sidecar's own state (rule 3). Nothing in this file decides anything about
+//! daemon's own state (rule 3). Nothing in this file decides anything about
 //! playback; it decides how playback is *shown*.
 
 use relm4::ComponentSender;
@@ -146,12 +146,12 @@ impl AppModel {
             .emit(PlayerViewInput::Sync(Box::new(snap.clone())));
         self.now_playing.emit(NowPlayingInput::Sync(Box::new(snap)));
 
-        // The queue dialog reads MusicKit's queue, not our library list. The
+        // The queue dialog reads the daemon's queue, not our library list. The
         // playing track is named by its **queue position**, which is the one
         // answer that survives a duplicate: a queue may hold the same track
         // twice (#88), and an id marks both copies. `queue_position` is already
         // the reconciled index — `corrected_position` re-derived it from
-        // `now_playing`, because MusicKit does not re-index after an edit.
+        // `now_playing`.
         //
         // It is a **cursor, not a count of what has been played** — clicking
         // track 300 of a playlist puts it at 300 the instant playback starts,

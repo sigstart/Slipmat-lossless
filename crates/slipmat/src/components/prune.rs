@@ -3,8 +3,7 @@
 
 //! Keeping `~/.cache/slipmat/artwork` from growing forever.
 //!
-//! It is the last unbounded thing Slipmat writes: the Chromium cache is capped
-//! and the library cache is one 430KB file, but every cover fetched for every
+//! It is the last unbounded thing Slipmat writes: the library cache is one 430KB file, but every cover fetched for every
 //! search anybody ever ran stays on disk. Measured at 973 files and 41MB
 //! against a library that can only account for about 700 of them.
 //!

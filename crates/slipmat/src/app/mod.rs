@@ -5,7 +5,7 @@
 //!
 //! Redux with a compiler: `AppMsg` are the actions, `update` is the sole
 //! reducer, and the view is derived from `AppModel`. No I/O happens inline —
-//! the sidecar's stdout is drained by a streaming relm4 `Command` so the GTK
+//! the daemon's socket is drained by a streaming relm4 `Command` so the GTK
 //! main thread never blocks (CLAUDE.md rule 8).
 //!
 //! ## What lives where
@@ -20,10 +20,10 @@
 //! | --- | --- |
 //! | [`view`] | which section is showing, and the three encodings of that |
 //! | [`library`] | loading and filtering songs, albums, artists and search |
-//! | [`queue`] | turning a click into a `setQueue`, and healing a rejected one |
+//! | [`queue`] | turning a click into a queue request |
 //! | [`pages`] | the album / artist navigation stack |
 //! | [`playback`] | pushing mirrored state to the bar, MPRIS, notifications |
-//! | [`supervise`] | keeping the sidecar alive and folding in its events |
+//! | [`supervise`] | staying connected to the daemon and folding in its events |
 //! | [`status`] | what the pane shows when it is not showing music |
 //! | [`chrome`] | the menu, its accelerators, and the three dialogs |
 //!
@@ -65,7 +65,7 @@ use slipmat_core::player::protocol::RepeatMode;
 
 /// How often the seek bar redraws while playing.
 ///
-/// The sidecar's own position events are coarse and irregular, so
+/// Position events are coarse, so
 /// `PlayerState::interpolated_position_ms` fills the gaps; this timer just
 /// drives the repaint. Removed entirely when not playing — a paused player
 /// should cost nothing (the same discipline as Pitwall's suspend-gated poll).
@@ -107,19 +107,19 @@ const TILE_ART: u32 = 320;
 /// is an unbounded number of requests.
 const CATALOG_MAX: usize = 200;
 
-/// Where we are in bringing the sidecar up. Each variant is a distinct
+/// Where the daemon is in bringing playback up. Each variant is a distinct
 /// `StatusPage`, because "it's just spinning" is the failure mode this whole
 /// module exists to avoid (rule 4).
 #[derive(Debug, Default)]
 pub enum Stage {
     #[default]
     Starting,
-    /// Loaded music.apple.com; waiting for the hook to attach.
+    /// Connecting, or restoring a saved session.
     Connecting,
-    /// Signed out. Apple's own login window is one click away.
+    /// Signed out. The sign-in dialog is one click away.
     SignedOut,
     Ready,
-    /// Apple changed the page, or the CDM is unavailable. Names the fix.
+    /// The provider is missing or failed. Names the fix.
     Broken(String),
 }
 
@@ -134,7 +134,7 @@ pub struct AppModel {
     sign_in_dialog: Option<Controller<sign_in::AuthDialog>>,
     sign_in_needed_for_play: bool,
 
-    /// The last track MusicKit reported, kept so the bar can hold it through a
+    /// The last track the daemon reported, kept so the bar can hold it through a
     /// queue reload — see `push_snapshot::showing`.
     last_item: Option<slipmat_core::player::protocol::Item>,
 
@@ -237,7 +237,7 @@ pub struct AppModel {
     library_icons: RowRegistry<LibraryRowWidgets>,
     /// Who is playing. Shared with every library row; see `CurrentTrack`.
     current_track: CurrentTrack,
-    /// Ids MusicKit refused, shared with every library row; see `DeadTracks`.
+    /// Ids Apple refused, shared with every library row; see `DeadTracks`.
     dead_rows: DeadTracks,
     /// What has changed about a track since it was fetched — favourites and
     /// library membership — shared with every row in every list. See
@@ -350,19 +350,18 @@ pub struct AppModel {
     /// guard a slow request for "aita" can overwrite the results for "aitana".
     search_gen: u64,
     loading_library: bool,
-    /// Catalog ids MusicKit has told us it cannot resolve. Remembered for the
+    /// Catalog ids Apple has refused. Remembered for the
     /// session so a delisted track only breaks one play attempt, not every one.
     dead_ids: std::collections::HashSet<String>,
     /// The last queue we tried and the id we wanted to start on, so a
     /// `NOT_FOUND` can be retried without the offenders instead of making the
     /// user click again. An id rather than an index — see `queue_from`.
     last_queue: Option<(Vec<String>, Option<String>)>,
-    /// The track we asked to start on, held until MusicKit's own queue confirms
-    /// it. See `verify_start`: the queue MusicKit builds is not always the list
+    /// The track we asked to start on, held until the daemon's queue confirms
+    /// it. See `verify_start`: the queue the player builds is not always the list
     /// we sent, so the position we asked for is not always the track we meant.
     pending_start: Option<String>,
-    /// Volume is the one piece of player state the sidecar never echoes back,
-    /// so we hold it here to keep the bar and MPRIS agreeing.
+    /// The volume this client last set, which keyboard steps count from.
     volume: f64,
     /// Where the current cover lives on disk, for MPRIS's file:// artUrl.
     art_path: Option<PathBuf>,
@@ -464,7 +463,7 @@ pub enum AppMsg {
         from: usize,
         to: usize,
     },
-    /// Grow the queue MusicKit already holds, without rebuilding it.
+    /// Grow the queue the daemon already holds, without rebuilding it.
     Enqueue {
         catalog_id: String,
         next: bool,
@@ -584,9 +583,8 @@ pub enum AppMsg {
     },
     /// The navigation view popped a page — drop the state behind it.
     PagePopped(u64),
-    /// Act on a track in MusicKit's queue, by id. The position is resolved
-    /// against the live queue at send time — our row order can drift from
-    /// MusicKit's, and sending a stale position got INVALID_ARGUMENTS.
+    /// Act on a track in the queue, by id. The position is resolved against
+    /// the live queue at send time, because our row order can drift from it.
     JumpTo {
         at: usize,
         id: String,
@@ -634,7 +632,7 @@ pub enum CommandMsg {
 }
 
 /// The drawer emits the same outputs as the bar, so they map the same way.
-/// Two players disagreeing about one MusicKit is the thing this avoids.
+/// Two controls disagreeing about one player is the thing this avoids.
 fn map_player_output(out: NowPlayingOutput) -> AppMsg {
     match out {
         NowPlayingOutput::PlayPause => AppMsg::PlayPause,
@@ -1240,7 +1238,7 @@ impl Component for AppModel {
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
         // The bar emits intent, never commands — `app/mod.rs` is the only place
-        // that talks to the sidecar (rule 9).
+        // that talks to the daemon (rule 9).
         let now_playing = NowPlaying::builder()
             .launch(())
             .forward(sender.input_sender(), |out| match out {
@@ -1433,7 +1431,7 @@ impl Component for AppModel {
             search_gen: 0,
             loading_library: false,
             // Seeded from the cache so the first play of a session does not
-            // have to rediscover them by failing a setQueue.
+            // have to rediscover them by failing.
             dead_ids: slipmat_core::unplayable::load(),
             last_queue: None,
             pending_start: None,
@@ -1610,7 +1608,7 @@ impl Component for AppModel {
     /// [`AppModel::sync_pins`] have to run on **both** paths.
     ///
     /// The default calls `update_cmd` then `update_view`, and command messages
-    /// are how the sidecar's events arrive — including the one that moves
+    /// are how the daemon's events arrive — including the one that moves
     /// `stage` to `Ready`, which is what reveals the Now Playing bar. Syncing
     /// only in `update_with_view` left the bar and the drawer hidden for the
     /// whole session, because their transition happened on the path that was
@@ -1762,7 +1760,7 @@ impl AppModel {
             AppMsg::Seek(position_ms) => {
                 self.transport(Transport::Seek { position_ms });
                 // Announce the jump straight away rather than waiting for the
-                // sidecar's echo. The spec requires `Seeked` on discontinuous
+                // daemon's echo. The spec requires `Seeked` on discontinuous
                 // moves — without it controllers keep extrapolating from the
                 // old position and their progress bars drift.
             }
@@ -2164,7 +2162,7 @@ impl AppModel {
             }
             AppMsg::MoveQueueItem { from, to } => {
                 // **Optimistic.** The row is already where the user dropped it,
-                // so the projection moves now and MusicKit's echo confirms it —
+                // so the projection moves now and the daemon's echo confirms it —
                 // the same shape as a library write, and for the same reason: a
                 // drop that visibly springs back while a command is in flight
                 // reads as a failure even when it worked.
@@ -2177,9 +2175,8 @@ impl AppModel {
             AppMsg::ClearQueue => {
                 tracing::info!("clearing the queue");
                 self.ask(Request::ClearQueue);
-                // Nothing to come back to next launch, either. The mirror
-                // follows the sidecar's queue event as always (rule 3) — this
-                // is only the part MusicKit cannot know about.
+                // The mirror follows the daemon's queue event as always
+                // (rule 3); this drops what only this client holds.
                 self.last_queue = None;
                 self.pending_start = None;
                 self.last_item = None;
@@ -2277,7 +2274,7 @@ impl AppModel {
                 self.enqueue(ids, false);
             }
             AppMsg::SetShuffle(on) => {
-                // Sent and forgotten: the mirror updates when MusicKit echoes
+                // Sent and forgotten: the mirror updates when the daemon echoes
                 // it back, so the button never claims a state the player is not
                 // actually in (rule 3).
                 tracing::info!(on, "shuffle");
@@ -2496,9 +2493,7 @@ impl AppModel {
     /// Put the first-run gate up or take it down, to match the session.
     ///
     /// Driven from one place rather than from each site that changes `stage`,
-    /// because there are four of them — tokens arriving, an authorization
-    /// change, a hook attaching, and signing out — and three of them would have
-    /// been easy to forget.
+    /// because several paths do and most of them would be easy to forget.
     fn sync_onboarding(&mut self, sender: &ComponentSender<Self>, root: &adw::ApplicationWindow) {
         match (matches!(self.stage, Stage::SignedOut), &self.onboarding) {
             (true, None) if self.sign_in_dialog.is_none() => {

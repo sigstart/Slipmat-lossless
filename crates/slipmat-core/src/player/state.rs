@@ -1,28 +1,24 @@
 // SPDX-FileCopyrightText: 2026 Miguel Rincon
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The mirror of the sidecar's playback state.
+//! The daemon's playback state, as clients and MPRIS see it.
 //!
-//! **This is a projection, not a source of truth** (CLAUDE.md rule 3). The UI
-//! never mutates it directly: a click sends a `Command`, and the change lands
-//! here only when the sidecar echoes it back. That round trip is what keeps
-//! Rust and MusicKit from disagreeing about what is playing — and it is why
+//! **This is a projection of the daemon's queue player** (CLAUDE.md rule 3).
+//! Clients never mutate it: a click sends a `Command`, and the change lands
+//! here when `slipmatd/src/queue.rs` applies the resulting event. That is why
 //! `apply()` is the only way to write to this struct.
 //!
-//! The seek-bar helpers (`interpolated_position_ms`, `progress`) and the
-//! volume/shuffle/repeat fields land in M2's Now Playing bar; they are here now
-//! because their edge cases are what the tests below pin down. Hence the allow.
+//! The seek helpers are unused while the provider cannot seek. Hence the allow.
 #![allow(dead_code)]
 
 use std::time::Instant;
 
 use super::protocol::{Event, Item, PlaybackState, Queue, QueueChange, RepeatMode};
 
-/// How long to wait for a seek to show up in MusicKit's own reports.
+/// How long to wait for a seek to show up in the player's position reports.
 ///
 /// Generous: it is a ceiling on how long a *failed* seek can hold the position,
-/// not a deadline the ordinary case runs against — that resolves in about a
-/// second, which is MusicKit's reporting interval.
+/// not a deadline the ordinary case runs against.
 const SEEK_SETTLE: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// How close a reading has to be to count as the seek having landed.
@@ -35,26 +31,21 @@ const SEEK_TOLERANCE_MS: u64 = 1_500;
 pub struct PlayerState {
     pub state: PlaybackState,
     pub now_playing: Option<Item>,
-    /// Queue as MusicKit reports it. Reconciled, never authored here.
+    /// Queue as the daemon's player reports it. Reconciled, never authored here.
     pub queue: Vec<Item>,
     pub queue_position: usize,
-    /// Whether MusicKit's own idea of the position had to be corrected.
+    /// Whether the reported index had to be corrected after an edit.
     pub position_disagrees: bool,
     pub position_ms: u64,
     pub duration_ms: u64,
     pub volume: f64,
     pub shuffle: bool,
     pub repeat: RepeatMode,
-    /// When `position_ms` was last set, so the UI can interpolate between the
-    /// sidecar's coarse `playbackTimeDidChange` ticks without lying when paused.
+    /// When `position_ms` was last set, so the UI can interpolate between
+    /// coarse position reports without lying when paused.
     last_tick: Option<Instant>,
-    /// A seek we asked for and MusicKit has not confirmed yet.
-    ///
-    /// Reports keep arriving from *before* the seek for a moment — MusicKit
-    /// emits roughly once a second and does not stop while it moves — and each
-    /// one used to drag the position back to where the track was, then forward
-    /// again when the real reading landed. That is the slider jumping under the
-    /// finger that moved it.
+    /// A seek we asked for and the player has not confirmed yet. Reports from
+    /// before the seek would otherwise drag the slider back under the finger.
     seeking_to: Option<(u64, Instant)>,
 }
 
@@ -114,39 +105,25 @@ impl PlayerState {
 
     fn apply_queue(&mut self, queue: &Queue) {
         self.queue = queue.items.clone();
-        // `None` (MusicKit's -1) means a queue is loaded but nothing is current
+        // `None` (-1 on the wire) means a queue is loaded but nothing is current
         // yet. Treat that as position 0 for display, but keep `has_previous`
         // honest via the same value — you cannot go back from "not started".
         let reported = queue.index().unwrap_or(0);
         self.queue_position = corrected_position(reported, &self.queue, self.now_playing.as_ref());
-        // Remembered so the caller can tell MusicKit when the two disagree —
-        // correcting our own copy is only half of it, and the half MusicKit
-        // keeps is the one `skipToNextItem` counts from.
-        //
-        // **Only after an edit** (#121). Correcting our own copy is always right
-        // — `now_playing` is the fact and the reported index is a hint. Writing
-        // the correction *back* is only right when the edit is what made the
-        // index stale. MusicKit pre-advances its cursor a few hundred
-        // milliseconds before every boundary, and that disagreement looks
-        // identical here: reported is one ahead, `now_playing` has not caught up
-        // yet, and both are behaving correctly. Settling it pushed MusicKit
-        // backwards mid-advance and put a command inside the window
-        // `log_transition` looks over, so the rule 3 check stopped being able to
-        // fail. The sidecar knows which event fired; this trusts it rather than
-        // guessing from the shape.
+        // Only an edit makes the reported index stale; a cursor move that
+        // merely runs ahead of `now_playing` is not a disagreement (#121).
         self.position_disagrees =
             self.queue_position != reported && queue.reason == QueueChange::Items;
     }
 
-    /// Move an item, before MusicKit has confirmed it.
+    /// Move an item, before the daemon has confirmed it.
     ///
     /// **Optimistic, and the projection is where that has to happen.** The
     /// queue view is rebuilt from this, so reordering locally there would be
-    /// undone by the next sync — which arrives before MusicKit's echo does.
+    /// undone by the next sync.
     ///
     /// `to` is the item's index *after* the move, which is what a drop means
-    /// and what the sidecar's remove-then-insert produces. Verified against a
-    /// real queue in both directions.
+    /// and what the daemon's remove-then-insert produces.
     ///
     /// The position needs no arithmetic: it is re-derived from `now_playing`,
     /// which a reorder never changes.
@@ -161,12 +138,7 @@ impl PlayerState {
         true
     }
 
-    /// Position interpolated to *now*, clamped to the track length.
-    ///
-    /// The sidecar only ticks a few times a second; without this the seek bar
-    /// visibly steps. Clamping matters because a stale `last_tick` across a
-    /// suspend/resume would otherwise report a position past the end.
-    /// Adopt a position we asked for, before MusicKit has confirmed it.
+    /// Adopt a position we asked for, before the player has confirmed it.
     ///
     /// The base *and* the clock, together: moving one without the other makes
     /// the next interpolation extrapolate from the new position using the old
@@ -198,6 +170,11 @@ impl PlayerState {
         true
     }
 
+    /// Position interpolated to *now*, clamped to the track length.
+    ///
+    /// Position reports are coarse; without this the seek bar visibly steps.
+    /// Clamping matters because a stale `last_tick` across a suspend/resume
+    /// would otherwise report a position past the end.
     pub fn interpolated_position_ms(&self) -> u64 {
         let base = self.position_ms;
         if !self.state.is_playing() {
@@ -234,19 +211,12 @@ impl PlayerState {
 
 /// Which index the playing track is *actually* at.
 ///
-/// **MusicKit does not re-index its own position when the queue is edited.**
-/// Measured: with index 32 playing, removing index 30 leaves the audio alone
-/// and shifts the track to 31 — while `position` still reports 32, which now
-/// names a different song. Moving an item across the current track does the
-/// same. Verified against a real queue for both a removal and a splice.
+/// The reported index is a hint and `now_playing` is the fact: an edit above
+/// the playing track shifts it, and the row marker and the saved session's
+/// start index both read this.
 ///
-/// So the reported index is a hint, and `now_playing` is the fact. Everything
-/// downstream reads this: the row marker, the saved session's start index, and
-/// the reload that recovers a dead playback — each of which would otherwise
-/// name the wrong track after any edit above the one playing.
-///
-/// The sidecar's occurrence id distinguishes duplicate tracks exactly. The
-/// nearest catalog-id match remains for queues reported by an older sidecar.
+/// The occurrence id distinguishes duplicate tracks exactly. The nearest
+/// catalog-id match covers items that carry none.
 fn corrected_position(reported: usize, queue: &[Item], playing: Option<&Item>) -> usize {
     let Some(playing) = playing else {
         return reported;
@@ -327,9 +297,6 @@ mod tests {
 
     #[test]
     fn a_reading_from_before_a_seek_does_not_drag_the_position_back() {
-        // MusicKit keeps reporting while it moves, so the first reading after a
-        // seek is usually from *before* it. Taking that one is what snapped the
-        // slider back under the finger that had just moved it.
         let mut s = PlayerState::new();
         s.apply(&Event::Position {
             position_ms: 30_000,
@@ -361,8 +328,8 @@ mod tests {
 
     #[test]
     fn a_seek_that_never_lands_does_not_freeze_the_position() {
-        // Otherwise a seek MusicKit quietly refused would hold the slider still
-        // for the rest of the track, which reads as a dead player.
+        // Otherwise a refused seek would hold the slider still for the rest of
+        // the track, which reads as a dead player.
         let mut s = PlayerState::new();
         s.seeked_to(120_000);
         s.seeking_to = Some((120_000, Instant::now() - SEEK_SETTLE * 2));
@@ -378,15 +345,8 @@ mod tests {
 
     #[test]
     fn a_queue_that_has_gone_away_empties_the_projection() {
-        // **#130.** Signing out clears Apple's session and reloads the page, so
-        // MusicKit comes back holding nothing. Rust only learns that from an
-        // event — and when none arrived, the mirror kept the old queue, `holds`
-        // called the next click "already loaded", and `changeToIndex` went into
-        // a queue that no longer existed. Nothing played until a restart.
-        //
-        // The sidecar now reports the queue whenever the hook attaches. This is
-        // the half that has to be true for that to help: an empty report must
-        // actually empty the projection rather than being ignored as "no news".
+        // #130: an empty report must empty the projection rather than being
+        // ignored as "no news", or the next click jumps into a dead queue.
         let mut s = PlayerState::new();
         let items = q(&["a", "b", "c"]);
         s.apply(&Event::NowPlaying {
@@ -443,8 +403,7 @@ mod tests {
         });
         assert_eq!(s.queue_position, 2, "baseline");
 
-        // "a" is removed. MusicKit shifts the items and does *not* re-index:
-        // it still says 2, which now names "d".
+        // "a" is removed, and a stale report still says 2, which now names "d".
         s.apply(&Event::Queue(Queue {
             position: 2,
             items: q(&["b", "c", "d"]),
@@ -456,21 +415,13 @@ mod tests {
         );
         assert!(
             s.position_disagrees,
-            "and MusicKit has to be told, or `skipToNextItem` counts from 2"
+            "an edit leaves the reported index stale"
         );
     }
 
     #[test]
-    fn musickits_pre_advance_is_not_a_disagreement_to_settle() {
-        // **#121.** A few hundred milliseconds before every boundary MusicKit
-        // moves its own cursor to the next track while `now_playing` is still
-        // the current one. Our copy is corrected — that half is always right —
-        // but writing it *back* pushes MusicKit backwards mid-advance, and it
-        // put a command inside the window `log_transition` looks over, so the
-        // rule 3 check could no longer fail.
-        //
-        // Measured lead times before the transition: 231, 284, 317, 345, 346
-        // and 802ms.
+    fn a_cursor_running_ahead_is_not_a_disagreement_to_settle() {
+        // #121: the cursor can reach the next track before `now_playing` does.
         let mut s = PlayerState::new();
         let items = q(&["a", "b", "c"]);
         s.apply(&Event::NowPlaying {
@@ -483,7 +434,7 @@ mod tests {
         });
 
         s.apply(&Event::Queue(Queue {
-            position: 1, // MusicKit has moved on; `now_playing` has not
+            position: 1, // the cursor has moved on; `now_playing` has not
             items: items.clone(),
             reason: QueueChange::Position,
         }));
@@ -491,15 +442,14 @@ mod tests {
         assert_eq!(s.queue_position, 0, "our copy still follows now_playing");
         assert!(
             !s.position_disagrees,
-            "but MusicKit is right and must not be corrected"
+            "but the cursor is right and must not be corrected"
         );
     }
 
     #[test]
     fn an_identical_disagreement_after_an_edit_is_still_settled() {
-        // The same numbers as the test above, and the opposite answer. Nothing
-        // about the *shape* separates them — only which MusicKit event fired,
-        // which is why the sidecar reports it rather than this guessing.
+        // The same numbers as the test above, and the opposite answer: only
+        // the reported reason separates them.
         let mut s = PlayerState::new();
         let items = q(&["a", "b", "c"]);
         s.apply(&Event::NowPlaying {
@@ -525,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn a_sidecar_that_does_not_say_why_is_never_settled() {
+    fn a_queue_report_that_does_not_say_why_is_never_settled() {
         // The default is `Position`, deliberately: settling is a write to the
         // player at its most delicate moment, so it happens only when something
         // says an edit occurred — never because nothing said otherwise.
@@ -542,8 +492,8 @@ mod tests {
 
     #[test]
     fn removing_a_track_above_the_playing_one_is_corrected() {
-        // The measured bug: playing index 2, something above it is removed, and
-        // MusicKit still reports 2 while the track is now at 1.
+        // Playing index 2, something above it is removed, and the report still
+        // says 2 while the track is now at 1.
         let items = q(&["a", "c", "d"]);
         let playing = Item {
             id: Some("c".into()),

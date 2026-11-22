@@ -15,7 +15,8 @@ mechanism and the music, and lets the record turn on its own terms.
 interface natively and plays licensed ALAC through Apple's Android FairPlay
 libraries. GTK and CLImat share the same playback and account session in
 `slipmatd`. See the [FairPlay provider spec](docs/specs/SPEC-fairplay-provider.md)
-for the Rust provider and the phase 1 record in its history.
+for the Rust provider. The phase 1 spec it replaced, and the Electron and
+MusicKit JS player before that, are in the git history (`2995eeb`, `600f022`).
 
 ### Engine and clients
 
@@ -52,7 +53,7 @@ playback dependencies.
 Rust edition 2024, plus `anyhow` 1 (rule 5) and `tracing-subscriber` 0.3 with
 `env-filter` for `RUST_LOG`. Toolchain ≥ 1.93 (relm4 0.11's MSRV); libadwaita
 ≥ 1.8 / GTK ≥ 4.20 (the `gnome_49` floor). Verified on this machine: rustc
-1.98.0, GTK 4.22.4, libadwaita 1.9.2, node v26.4.0, PipeWire 1.6.8.
+1.98.0, GTK 4.22.4, libadwaita 1.9.2, PipeWire 1.6.8.
 
 **Keep this machine on the same stable CI is.** Nothing pins a toolchain, so
 both follow stable — and when they drift, `make check` passes here and the
@@ -101,7 +102,7 @@ state or errors.
 
 ### 5. No `.unwrap()` / `.expect()` outside `main.rs` and tests
 
-The sidecar can die, the network can drop, Apple can 403 a stale token. Every
+The provider can die, the network can drop, Apple can 403 a stale token. Every
 failure becomes an `adw::Toast` or a state, never a crash. `anyhow::Result`
 internally.
 
@@ -203,12 +204,10 @@ inverse — answers `400 Insufficient Permissions`:
 `'Favorites:DELETE:IdsQuery' entities require permissions that are not in the
 request`. So the row menu offers no removal.
 
-Worth knowing before anyone concludes it is impossible: **`music.apple.com` can
-un-favourite**, using the same session we borrow. So a route exists — just not
-this one. The likely candidate is MusicKit JS inside the sidecar, the way
-playback already works, rather than a REST call from Rust. Untried, and it would
-be the first time the sidecar is used for anything but audio, which is a real
-cost to weigh.
+Worth knowing before anyone concludes it is impossible: **`music.apple.com` and
+Apple's Android app can un-favourite**, so a route exists — just not this one.
+The MusicKit JS route went with the Electron player. What is left to try is
+whatever the Android client sends, through the provider's session. Untried.
 
 **Favourites and ratings are different things.** `favorites` is the modern star;
 `ratings` is the older love/dislike pair, whose only legal values are `1` and
@@ -317,81 +316,55 @@ Four files, three homes, and the distinction is not pedantry:
 | The library | `~/.cache/slipmat/library.json` | likewise, and 430 KB of it |
 | The last queue | `$XDG_STATE_HOME/slipmat/session.json` | neither chosen nor rederivable |
 
+The daemon writes and restores the session and the library cache. GTK only
+reads them.
+
 Two rules the restore follows:
 
 - **It never resumes playing.** `Command::SetQueue` carries `start_playing`, and
-  this is the only place that sends `false`. An app that starts making noise
-  because it was launched is hostile; the point is to remove the work of finding
-  your place, not to take the decision away.
-- **It saves on every track change as well as on shutdown.** Shutdown is the
-  only moment the position is accurate, and also the one that might not run —
-  a crash, a `SIGKILL`, a session ending badly. Saving per track means the worst
-  case is restoring the right track at its start rather than restoring nothing.
+  `restore_session` in `slipmatd/src/serve.rs` is the only place that sends
+  `false`. An app that starts making noise because it was launched is hostile;
+  the point is to remove the work of finding your place, not to take the
+  decision away.
+- **It saves on every track change as well as on shutdown.** Shutdown might not
+  run — a crash, a `SIGKILL`, a session ending badly. Saving per track means the
+  worst case is restoring the right track rather than restoring nothing.
 
-**The position rides in the queue descriptor, not a seek afterwards.**
-`setQueue` accepts `startTime`, and it has to be used: a seek needs a *current
-item* to seek within, and a queue loaded with `startPlaying: false` does not
-have one yet. The first attempt sent a seek once the queue arrived and it did
-nothing at all.
+**It restores the track, not the position within it.** `session.json` still
+records `position_ms`, but the provider cannot seek yet, so the restored queue
+starts its current track from the beginning.
 
-**A loaded-but-never-started queue has no now-playing item either**, for the
-same reason. Rendering that faithfully left the Now Playing bar empty beside a
-full queue, so `showing()` falls back to the queue's own current entry — which
-is the honest answer to "what is this player on".
+**A loaded-but-never-started queue has no now-playing item**, and rendering that
+faithfully left the Now Playing bar empty beside a full queue. So `showing()`
+falls back to the queue's own current entry, which is the honest answer to
+"what is this player on".
 
 ### Opening on the library rather than on a spinner
 
-`library_cache.rs` writes all four collections to `~/.cache/slipmat/` and `init`
-seeds the model from them before the sidecar is even spawned. **163 ms to a full
-library, measured, against 3.2 s.**
+Once authorized, the daemon fetches all four collections at once and writes
+them to `~/.cache/slipmat/library.json` through `library_cache.rs`. It publishes
+`Event::LibraryChanged` only when the result differs from what it holds.
+GTK reads the cache when the daemon first reports `Ready` and again on every
+`LibraryChanged`, so a restored session shows the last launch's library while
+the refresh runs.
 
-The 3.2 s is the number that mattered, and the issue had it as 1.9 s because it
-timed the fetch alone. Two halves, and only one of them was the library:
+Two things make it work, and both are load-bearing:
 
-| | before | after |
-| --- | --- | --- |
-| sidecar boot → `Ready` | 1.5–2.2 s | unchanged, and now behind content |
-| library fetch | 1.3–1.9 s | behind content |
-| **content on screen** | **2.9–3.7 s** | **~0.19 s** |
+- **`showing_library()` is not gated on `Stage::Ready`.** Content already in the
+  model is real content; the daemon still starting is a fact about the
+  transport. `controls_live()` gates the sidebar, search and sort, so nothing
+  can be *requested* with no session.
+- **A refresh that changed nothing must not rebuild.** The daemon's
+  `commit_library` skips the write and the event when nothing changed. GTK's
+  `replace_changed` compares with `PartialEq` before it drops a section's built
+  widgets, so the widgets and the scroll position stay as they are.
 
-Three things make it work, and each is load-bearing:
+**Clearing the queue** is daemon state. It stops playback, empties the queue
+and drops the saved session, because there is nothing to come back to.
 
-- **`showing_library()` is not gated on `Stage::Ready`.** It was, and that gate
-  alone would have held cached content back for the whole sidecar boot —
-  cache or no cache. Content restored from disk is real content; the sidecar
-  being half-booted is a fact about the transport. `controls_live()` still
-  gates the sidebar, search and sort, so nothing can be *fetched* with no token.
-- **A refresh that changed nothing must not rebuild.** `Track` gained
-  `PartialEq` for exactly this: `fetched != self.all_tracks` is the whole test,
-  and when it is false the widgets, the scroll position and the file on disk are
-  all already correct. Measured over a real library, all four come back
-  `changed=false` on an ordinary launch.
-- **The loaders' guard is `tried_*` alone.** It used to be `tried_* || !collection.is_empty()`,
-  which said the same thing while a fetch was the only way to fill a collection.
-  Seeded from disk, that second clause would have refused to ever refresh.
-
-**All four refresh at startup now, not songs plus whichever section you opened
-into.** That ordering made sense when a fetch was the only way to fill a
-section — the wait was paid where it was asked for. With the cache the sections
-are already on screen, so one left unrefreshed shows last launch's answer until
-you press reload. Measured: four concurrent loads finish in 2.0 s against 1.5 s
-for songs alone, and Apple did not rate-limit 24 concurrent paginated requests.
-
-The write is 430 KB in 3 ms on the GTK thread, at most once per collection per
-launch. It is skipped entirely when nothing changed — four unconditional writes
-was 1.7 MB per launch to say nothing.
-
-**Clearing the queue is not one documented call.** `clearQueue`,
-`queue.splice` and `setQueue({songs: []})` are all plausible depending on the
-MusicKit build, so the sidecar tries them in that order and throws if items
-remain — and stops playback first, because an empty queue with a track still
-playing is a state nothing else expects. Clearing also drops the saved session:
-there is nothing to come back to.
-
-**And `changeToMediaAtIndex` only moves the cursor.** On a queue that is loaded
-but idle it moves silently, so clicking a track in the queue looked like nothing
-happened. Clicking a track is a request to *play* it, so a jump now starts
-playback if it is not already running.
+**Clicking a track in the queue plays it.** `Command::ChangeToIndex` starts
+playback even when the queue is loaded but idle. Moving the cursor silently
+looked like nothing happened.
 
 ## UI shape
 
@@ -401,8 +374,9 @@ playback if it is not already running.
   the track's progress as a thin line across the top of the bar. That line is
   **information, not a control** — a scale needs a grabbable handle and room to
   aim in, and the bar is what runs out of room first when the window is tiled
-  narrow. Scrubbing lives in the drawer, which has the width for it. The bar is
-  visible on every page — it is the app.
+  narrow. Scrubbing lives in the drawer, which has the width for it; it stays
+  insensitive while the daemon reports `PlaybackCapabilities { seek: false }`,
+  as do shuffle and repeat. The bar is visible on every page — it is the app.
 - Main content: `adw::NavigationView` over an `adw::ViewStack` (clamped) —
   **Library** (playlists / albums / songs) and **Search**. The queue is an
   `adw::Dialog` or a sidebar sheet from the bottom bar, not a page.
@@ -439,7 +413,7 @@ playback if it is not already running.
   sent. So the sequence is: user moves the slider → the handler fires → the
   very next view update writes the *old* model value back into the widget →
   GTK emits for that → the two values ping-pong through the reducer forever.
-  Each lap was one sidecar command, one MPRIS property change on the bus and
+  Each lap was one player command, one MPRIS property change on the bus and
   one journal line; it managed 5,721 of them.
 
   **Block the handler while you write.** That is the fix, and comparing values
@@ -453,7 +427,7 @@ playback if it is not already running.
   with the value comparison in place: **495,000 laps, one write per message**,
   the two values a `page_increment` apart, the adjustment provably the same
   object throughout. The component's task never yields, so the *app's* task
-  never runs again — the window dies and commands stop reaching the sidecar
+  never runs again — the window dies and commands stop reaching the daemon
   entirely, which is why the log goes quiet rather than filling up.
 
   So a two-way control needs the handler's `SignalHandlerId` kept, and
@@ -484,7 +458,7 @@ playback if it is not already running.
   app still answering afterwards.
 
   **A frozen app does not fill the log, it stops writing to it.** The loop
-  starves the app's own task, so commands stop reaching the sidecar altogether:
+  starves the app's own task, so commands stop reaching the daemon altogether:
   the signature is a burst that ends mid-stream and never resumes, not a count
   that climbs. When a log goes quiet, take a core dump (`ptrace_scope` is 1
   here, so `kill -ABRT` and `coredumpctl debug` — see the wedge recipe in the
@@ -498,12 +472,11 @@ playback if it is not already running.
   this has no loop at all.
 
   `#[watch]` re-asserts its value after **every** message, and during playback
-  those never stop — a `refreshTokens` a second, a position tick twice a
-  second. Free for a label. For an animated property it is a request to
-  start-or-re-aim an animation, forever, at whatever rate messages happen to
-  arrive. It wedged the app at 100% CPU inside
-  `adw_spring_animation_set_value_to`, reached from `update_view` while
-  handling a routine token refresh.
+  those never stop — the daemon sends a snapshot twice a second. Free for a
+  label. For an animated property it is a request to start-or-re-aim an
+  animation, forever, at whatever rate messages happen to arrive. It wedged the
+  app at 100% CPU inside `adw_spring_animation_set_value_to`, reached from
+  `update_view` while handling a routine token refresh.
 
   Three properties are governed by this, and all three are written only from
   `sync_animated`: the sidebar's `show-sidebar`, the drawer's `open`, the bar's
@@ -513,7 +486,7 @@ playback if it is not already running.
     widget and a model that disagree persistently disagree on every message
     too, so asking the widget is the level trigger again wearing a guard's
     clothes.
-  - Synced on **both** update paths. Sidecar events arrive through
+  - Synced on **both** update paths. Daemon events arrive through
     `update_cmd_with_view`, not `update_with_view`, and one of them is what
     moves `stage` to `Ready` and reveals the Now Playing bar. Syncing on one
     path left the bar hidden for a whole session.
@@ -577,38 +550,38 @@ playback if it is not already running.
   `adw::ToastOverlay`. That's where the native feel comes from. No custom CSS
   unless there is no libadwaita widget for the job — say why before adding any.
 - **First run**: a **modal that cannot be dismissed**, wearing the app's own
-  icon, saying what Slipmat is, that it needs an active subscription, and —
-  before the button, not after — that Apple's own sign-in page opens in a
-  separate window.
+  icon, saying what Slipmat is and that it needs an active subscription. Its
+  button opens the native sign-in dialog (`app/sign_in.rs`): Apple Account,
+  password, then a six-digit verification code if Apple asks for one. The
+  credentials go to the daemon and on to the provider (rule 7). Any other
+  verification challenge ends the attempt with an explicit error.
 
   Blocking is the correct behaviour, not a nicety. Signed out, every control in
   the app is a control that cannot work: the sidebar sections fire library
   loads, the search box queries a catalog that answers 403, and the transport
-  talks to a player with no session. Leaving them reachable produced a 403 per
-  second against Apple for as long as the window was open, because the sidecar
-  pushes `refreshTokens` every second and each one re-ran the auto-load.
+  talks to a player with no session. Leaving them reachable once produced a 403
+  per second against Apple, because every token update re-ran the auto-load.
 
   Raised and lowered from **one** place (`sync_onboarding`, called after every
-  message), because four different paths change `stage` and three of them would
-  have been easy to forget. A browser
-  window appearing out of a native app is alarming when it is a surprise, and
-  this is the one moment the web engine cannot be hidden, so it is explained
-  instead. After it succeeds the sidecar hides forever. Never re-show it except
-  on explicit Sign Out → Sign In.
+  message), because several paths change `stage` and most of them would be easy
+  to forget. Once the daemon restores a saved session it never shows. Never
+  re-show it except on explicit Sign Out → Sign In.
 - **Sign Out** lives in the primary menu, in its own section — an account action
   is not app furniture and should not sit beside About. It asks first, because
-  it drops Apple's session and getting back in means the login window and
-  whatever two-factor prompt that involves. It then forgets *everything* that
-  belonged to that account: library, grids, catalog results, pushed pages,
-  queue, the bar — **and `library.json`**, which is the same music written down.
-  The unplayable-id cache stays, because that is a fact about Apple's catalog
-  rather than about the user.
-- Sidecar restarting, no subscription, offline, no results: distinct
-  `adw::StatusPage`s. Errors: `adw::Toast`.
+  it drops Apple's session and getting back in means the password and whatever
+  verification code that involves. The daemon then forgets *everything* that
+  belonged to that account, for every client: library, queue, saved session,
+  the bar — **and `library.json`**, which is the same music written down. GTK
+  also drops its grids, catalog results and pushed pages. The unplayable-id
+  cache stays, because that is a fact about Apple's catalog rather than about
+  the user.
+- Starting the playback engine, connecting, signed out, playback unavailable,
+  no results: distinct `adw::StatusPage`s. Errors: `adw::Toast`.
 
 ## MPRIS (the v1 bar)
 
-`org.mpris.MediaPlayer2.Slipmat`, via `mpris-server` 0.10.
+`org.mpris.MediaPlayer2.Slipmat`, via `mpris-server` 0.10, exported by
+`slipmatd` (`bus.rs`) so it works with no window open.
 
 - Metadata: `mpris:trackid`, `mpris:length`, `mpris:artUrl`, `xesam:title`,
   `xesam:album`, `xesam:artist`, `xesam:trackNumber`.
@@ -618,18 +591,26 @@ playback if it is not already running.
   `~/.cache/slipmat/artwork/` keyed by catalog id. That is what `artwork.rs` is
   for.
 - Bidirectional: `PlayPause` / `Next` / `Previous` / `Seek` / `SetPosition` /
-  `Volume` from the Shell must reach the sidecar, and every sidecar event must
-  update the exported properties. Half-working MPRIS is worse than none — the
-  shell shows controls that lie. Do not ship it.
+  `Volume` from the Shell must reach the daemon's queue, and every playback
+  event must update the exported properties. Half-working MPRIS is worse than
+  none — the shell shows controls that lie. That is why `CanSeek` is false
+  while the provider cannot seek, rather than accepting a seek and ignoring it.
 - Emit `Seeked` on discontinuous jumps, and keep `Position` honest between
   events with a 1s tick that is **removed when paused**.
 
 ## Where it is now
 
-Shipping, packaged for the AUR and Flatpak, released from tags. The playback
-engine, the library, catalog search, the queue view and MPRIS are all done and
-verified — the history of how is in the git log and the release notes, which is
-where it belongs rather than in a checklist nobody updates.
+`0.13.0-dev`, after the move from the Electron player to the FairPlay provider.
+The library, catalog search, the queue, sign-in, session restore and MPRIS work
+through the daemon. Playback through the provider is verified for sign-in and
+restore. Licensed output and licence denial still need live verification. Seek,
+shuffle, repeat and gapless transitions are not implemented yet (see
+[Known issues](#known-issues)).
+
+Packaging follows: the AUR has the `-git` split packages only, and the Flatpak
+builds in CI with no provider inside it. The history of how is in the git log
+and the release notes, which is where it belongs rather than in a checklist
+nobody updates.
 
 See [current architecture](#current-architecture).
 
@@ -733,9 +714,18 @@ its full height. An album is a dozen tracks. That is the right trade.
 
 ## Known issues
 
-None open. The list is kept because it will fill again, and because an empty
-one is worth being able to see — a section that silently stops being updated
-reads the same as a project with no bugs.
+Kept even when empty, because a section that silently stops being updated reads
+the same as a project with no bugs.
+
+- **The provider cannot seek, shuffle, repeat or play gaplessly yet.** The
+  daemon announces `seek: false, shuffle: false, repeat: false` and drops those
+  transport commands. Both clients and MPRIS grey the controls out rather than
+  offer ones that lie. A restored session therefore starts its track from 0.
+- **Licensed ALAC output and licence denial** still need a live run (see the
+  [provider spec's live qualification](docs/specs/SPEC-fairplay-provider.md#live-qualification)).
+- **No rate ceiling on client commands** since the sidecar went (#37, below).
+- **Removing library songs and un-favouriting** have no route (see
+  [Writing to the library](#writing-to-the-library--verified-against-apples-docs-2026-07-26)).
 
 **Fixed, and left here because the reasoning is still load-bearing:**
 
@@ -760,9 +750,10 @@ splice.
 A runaway reducer used to have nothing between it and the session (#37) — every dispatch
 journalled, no coalescing, no ceiling, so a message loop cost a disk write and a
 bus round trip per lap. That is why the `#[watch]` binding bug above reached the
-compositor instead of staying an app bug. `sidecar.rs` now carries a per-kind
-rate ceiling, deliberately generous: it exists to stop a storm, not to shape
-ordinary traffic.
+compositor instead of staying an app bug. The fix was a per-kind rate ceiling
+in `player/sidecar.rs`, and it was deleted with the sidecar. Nothing in the
+daemon replaces it yet, so a client message loop again reaches the daemon at
+full rate. Block the handler (above) and count what reaches the mixer.
 
 ## Commands
 
@@ -806,9 +797,9 @@ lines, and anything longer is a commit message.
 
 `## What it does` says **six** things, and that is the whole budget:
 
-1. a native GNOME app, with a small hidden web layer
+1. two native clients, GTK and the terminal, on one player
 2. the library — songs, albums, artists, playlists
-3. a player worth the name, gapless
+3. a player worth the name (gapless once the provider can do it)
 4. controls from the shell, the lock screen and the media keys, and playback
    that survives closing the window
 5. all of Apple Music, searchable

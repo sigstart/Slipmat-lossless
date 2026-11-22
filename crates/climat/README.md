@@ -44,7 +44,7 @@ Run `climat sign-in` to sign in to the shared Apple Music session. The daemon
 loads your library after sign-in. In the browser pane, use `R` to refresh,
 `Shift+A` to add the selected song, and `Shift+F` to favourite it.
 
-### Native authentication commands
+### Sign-in commands
 
 When CLImat shows `Run climat sign-in`, run that command from a second terminal.
 The queue starts the selected track after sign-in. Your Apple Account email and
@@ -60,8 +60,8 @@ exposes. That is how `cava` and every other visualiser works, and it means the
 bars follow whatever is playing, including a track the GNOME window started.
 
 **Only while Slipmat is playing.** A sink's monitor carries the whole machine
-mixed together. The record stream asks to be narrowed to the sidecar's own
-sink-input — real PulseAudio honours that; `pipewire-pulse` does not, measured —
+mixed together. The record stream asks to be narrowed to the FairPlay
+provider's own sink-input — real PulseAudio honours that; `pipewire-pulse` does not, measured —
 so what actually keeps a notification chime out of the bars is the player's own
 state: no bars unless Slipmat is playing.
 
@@ -116,8 +116,8 @@ tenth of a second and gets the original palette.
 | --- | --- |
 | `space` | Play / pause |
 | `z` `b` | Previous / next track |
-| `←` `→` | Seek five seconds |
-| `s` `r` | Shuffle / repeat |
+| `←` `→` | Seek five seconds, once the daemon supports seeking |
+| `s` `r` | Shuffle / repeat, likewise — both are off for now |
 | `-` `=` | Volume — the same one your desktop's audio panel shows |
 | `1` – `4` | Songs · albums · artists · playlists |
 | `5` | All of Apple Music |

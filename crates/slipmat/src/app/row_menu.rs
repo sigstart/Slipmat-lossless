@@ -95,7 +95,7 @@ impl AppModel {
         // GTK closes a PopoverMenu *before* activating the item you clicked. So
         // unparenting here tore down the action group a moment before the
         // action fired, and every menu item silently did nothing: no command
-        // left Rust, and the sidecar logged nothing because nothing was sent.
+        // left the app, and the daemon logged nothing because nothing was sent.
         // Deferring to an idle lets the activation land first.
         popover.connect_closed(|p| {
             let p = p.clone();

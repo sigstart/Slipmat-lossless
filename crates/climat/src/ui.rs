@@ -698,7 +698,7 @@ mod tests {
 
     #[test]
     fn a_track_with_no_duration_reads_as_empty_rather_than_full() {
-        // MusicKit reports zero before it knows, and dividing by it would give
+        // Duration is zero before it is known, and dividing by it would give
         // a bar that starts full and shrinks.
         let snap = Snapshot {
             duration_ms: 0,

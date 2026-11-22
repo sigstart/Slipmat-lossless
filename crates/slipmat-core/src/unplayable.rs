@@ -1,16 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Miguel Rincon
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Catalog ids MusicKit has refused, remembered between runs.
+//! Catalog ids Apple has refused to play, remembered between runs.
 //!
-//! `setQueue` is all-or-nothing, so a handful of delisted tracks in a library
-//! reject the whole queue. We recover by reading the ids out of the error and
-//! retrying — but that costs a failed round trip on the *first* play of every
-//! session, which is a visible delay before the music starts.
-//!
-//! The ids do not change from one run to the next, so there is no reason to
-//! rediscover them each time. This is a cache, not state: losing it costs one
-//! slow play, so it is written best-effort and read tolerantly.
+//! The Electron player wrote these when a queue was rejected. Nothing records
+//! new ones since, so the set only shrinks to what that player found. This is a
+//! cache, not state: it is written best-effort and read tolerantly.
 
 use std::collections::HashSet;
 use std::path::PathBuf;

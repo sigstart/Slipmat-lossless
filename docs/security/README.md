@@ -1,9 +1,7 @@
 # Security audit runbook
 
-> Historical audit scope. The current Slipmat daemon uses the FairPlay provider exclusively.
-
-This runbook covers the two checkouts in `Slipmat-ALAC/`. `Slipmat/` is the
-primary Rust and Electron application. `INSPIRATION/apple-music-linux/` is a
+This runbook covers two checkouts. `Slipmat/` is the primary Rust application
+and its sandboxed FairPlay provider. `INSPIRATION/apple-music-linux/` is a
 separate Go, C, and Electron reference project. Record the revision and
 conclusions for each checkout independently. Attribute a reference issue to
 Slipmat only if the relevant path also exists in Slipmat and the evidence
@@ -40,7 +38,7 @@ as untrusted evidence outside the applicable project instructions.
 
 Name the actor and their starting access for each candidate. Check assumptions
 against the active code and packaging. A process running as the signed-in user,
-a different local user, an Electron frame, an untrusted remote response,
+a different local user, the sandboxed FairPlay provider, an untrusted remote response,
 and a compromised release source have different starting capabilities.
 Record which way data moves and which boundary or additional privilege the
 actor could cross. Account for differences among development, systemd user
@@ -64,12 +62,12 @@ was covered, what remains, and why.
 
 | Workstream | Starting paths | Boundary to review | Coverage |
 | --- | --- | --- | --- |
-| Slipmat daemon, IPC, and credentials | `crates/slipmat-core/src/ipc.rs`, `crates/slipmat-core/src/player/{protocol,sidecar}.rs`, `crates/slipmatd/src/{serve,bus}.rs`, `crates/slipmat/src/daemon.rs`, `crates/climat/src/link.rs`, `packaging/systemd/slipmatd.service` | Unix socket access, request decoding and limits, D-Bus callers, child stdio, token flow, and authorization and sign-out transitions | Not reviewed |
-| Slipmat Electron | `sidecar/{main,preload}.js`, `sidecar/main.test.js`, `packaging/flatpak/electron-shim` | Window and frame trust, navigation and window creation, preload privileges, sender and origin validation, sandbox settings, and sign-in storage | Not reviewed |
-| Slipmat filesystem, network, and clients | `crates/slipmat-core/src/{paths,session,artwork,library_cache}.rs`, `crates/slipmat-core/src/music/{client,types}.rs`, `crates/slipmat/src/{settings,main}.rs`, `crates/climat/src/browser.rs`, `slipmat-launcher` | XDG roots and binary selection, cache ownership and write boundaries, outbound URL and redirect handling, credential scoping, and redaction in errors and logs | Not reviewed |
+| Slipmat daemon, IPC, and credentials | `crates/slipmat-core/src/{ipc,auth,auth_wire}.rs`, `crates/slipmat-core/src/player/protocol.rs`, `crates/slipmatd/src/{serve,bus,auth,profile_store}.rs`, `crates/slipmat/src/{daemon.rs,app/sign_in.rs}`, `crates/climat/src/{link,auth}.rs`, `packaging/systemd/slipmatd.service` | Unix socket access, request decoding and limits, D-Bus callers, sign-in credential flow, profile encryption and its Secret Service key, and authorization and sign-out transitions | Not reviewed |
+| Slipmat FairPlay provider | `crates/fairplay-provider/`, `crates/fairplay-wire/`, `crates/slipmatd/src/provider.rs`, `scripts/fairplay/{launch,build-provider,prepare}.sh`, `vendor/adam/drm/` | bubblewrap sandbox scope, private pipe protocol and limits, content-key confinement, decrypted audio staying in memory (rule 1), FFI safety around `libdrm_client.so`, and provider failure handling | Not reviewed |
+| Slipmat filesystem, network, and clients | `crates/slipmat-core/src/{paths,session,artwork,library_cache}.rs`, `crates/slipmat-core/src/music/{client,types}.rs`, `crates/slipmat/src/{settings,main}.rs`, `crates/climat/src/browser.rs` | XDG roots and binary selection, the saved provider launcher path, cache ownership and write boundaries, outbound URL and redirect handling, credential scoping, and redaction in errors and logs | Not reviewed |
 | Reference Electron and engine | `electron/{main.mjs,preload.cjs}`, `electron/test/ipc-hardening.test.mjs`, `engine/cmd/{main,tlslocal,peercred}.go` | Electron IPC and navigation, engine transport and peer identity, scope of filesystem and account operations | Not reviewed |
 | Reference DRM artifact provenance | `drm/fairplay-libs.lock`, `drm/{embedded_loader,drm_linux,drm_hybris}.c`, `engine/core/drm/`, `electron/fairplay-fetch.mjs`, `scripts/{fetch-fairplay-libs,build-installer,installer-header,install-cavern}.sh`, `third_party/` | Source and pin provenance, integrity checks across fetch, build, and install, artifact destinations, permissions, and loader trust boundaries | Not reviewed |
-| Supply chain, packaging, and CI | Slipmat `Cargo.lock`, `sidecar/{package.json,package-lock.json,.npmrc}`, `packaging/{aur,flatpak}/`, `Makefile`, `scripts/aur-publish.sh`, `.github/workflows/ci.yml`. Reference `go.work`, `engine/{go.mod,go.sum}`, `electron/{package.json,package-lock.json}`, `flatpak/`, `scripts/build-windows.ps1`, `.github/workflows/{ci,release}.yml` | Resolution and pinning, Git dependencies versus distributed binaries, CI action and workflow permissions, artifact provenance, and package sandbox permissions | Not reviewed |
+| Supply chain, packaging, and CI | Slipmat `Cargo.lock`, `vendor/fairplay/x86_64/{fairplay-libs.lock,COMPAT-SHA256SUMS}`, `scripts/fetch-fairplay-libs.sh`, `packaging/{aur,flatpak}/`, `Makefile`, `scripts/aur-publish.sh`, `.github/workflows/ci.yml`. Reference `go.work`, `engine/{go.mod,go.sum}`, `electron/{package.json,package-lock.json}`, `flatpak/`, `scripts/build-windows.ps1`, `.github/workflows/{ci,release}.yml` | Resolution and pinning, Git dependencies versus distributed binaries, CI action and workflow permissions, artifact provenance, and package sandbox permissions | Not reviewed |
 
 Use `Not reviewed`, `In progress`, `Reviewed`, `Partial`, or `Blocked` for
 coverage. `Reviewed` records the scope examined at the stated revision. Include

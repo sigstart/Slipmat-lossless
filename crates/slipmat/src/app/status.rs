@@ -13,12 +13,10 @@ use relm4::gtk;
 
 use super::{AppModel, Stage, View};
 
-/// Spinner or status page, while the sidecar is still coming up.
+/// Spinner or status page, while the daemon is still coming up.
 ///
-/// The distinction is whether waiting is the whole answer. Starting, fetching
-/// the CDM and connecting all resolve by themselves in a few seconds — measured
-/// at ~5s total, of which roughly 95% is Apple's own page and MusicKit booting,
-/// so there is very little here to make faster. Those stages want motion.
+/// The distinction is whether waiting is the whole answer. Starting and
+/// connecting resolve by themselves, so they want motion.
 ///
 /// Signed out, broken and reconnecting are different: each needs the user to
 /// read something or do something, and a spinner over them would promise a
@@ -46,10 +44,9 @@ impl AppModel {
     /// answer is how "Loading your library" ended up covering the Apple Music
     /// pane.
     pub(super) fn showing_library(&self) -> bool {
-        // Deliberately **not** gated on `Stage::Ready`. Content restored from
-        // the cache is real content, and the sidecar being half-booted is a
-        // fact about the transport, not about whether there is a library. That
-        // gate was worth ~1.5s of spinner over a list we already had on disk.
+        // Deliberately **not** gated on `Stage::Ready`: content already in the
+        // model is real content, and the daemon still starting is a fact about
+        // the transport, not about whether there is a library.
         //
         // What is still gated is `controls_live`: the sidebar, search and sort
         // stay insensitive until there is a session to ask, so the list can be
@@ -94,13 +91,10 @@ impl AppModel {
     /// Whether the window's own controls should respond yet.
     ///
     /// The same argument the first-run gate is built on, applied to the seconds
-    /// before we know whether there is a session at all: until the sidecar
+    /// before we know whether there is a session at all: until the daemon
     /// reports, every control here is one that cannot work. A sidebar section
     /// has nothing to load, the search box would query a catalog with no token,
     /// and the sort menu reorders a list that is not there.
-    ///
-    /// Measured at ~5 seconds from launch, so this is not a flicker — it is
-    /// long enough to click something and be told nothing happened.
     ///
     /// Deliberately *not* everything: the primary menu stays live throughout,
     /// because it holds Quit and About, and an app you cannot leave while it
@@ -111,7 +105,7 @@ impl AppModel {
 
     /// What the spinner page says it is waiting for.
     ///
-    /// Bringing the sidecar up comes first: during those stages no section is
+    /// Bringing playback up comes first: during those stages no section is
     /// loading anything, so naming the section would be a lie about what is
     /// actually slow.
     pub(super) fn waiting_for(&self) -> String {
@@ -141,19 +135,8 @@ impl AppModel {
         // say "Loading your library" reads as the whole app being stuck; the
         // sidebar spinners cover that instead.
         if !self.showing_library() && !matches!(self.stage, Stage::Ready) {
-            // A dead sidecar or a signed-out session outranks everything: no
-            // section has anything to show.
-            //
-            // But *how* it says so depends on whether waiting is the answer.
-            // Bringing the sidecar up takes about five seconds, measured, and
-            // roughly 95% of that is Apple's own page and MusicKit booting —
-            // there is almost nothing here to make faster. What there was to
-            // fix is that those seconds were spent on a `StatusPage` whose icon
-            // never moves, which reads as frozen rather than busy.
-            //
-            // So the transient stages get the spinner, and the ones that need a
-            // decision — signed out, broken, reconnecting — keep the status
-            // page, which can say what to do about it.
+            // A failed provider or a signed-out session outranks everything:
+            // no section has anything to show. See `startup_page` for how.
             return startup_page(&self.stage);
         }
 
@@ -277,7 +260,7 @@ mod tests {
 
     #[test]
     fn only_stages_that_resolve_themselves_get_a_spinner() {
-        // Motion promises "wait and this will finish". True while the sidecar
+        // Motion promises "wait and this will finish". True while the daemon
         // is coming up; a lie for the three that need the user to read or do
         // something, and a spinner over those is how a stuck app looks busy.
         for stage in [Stage::Starting, Stage::Connecting] {

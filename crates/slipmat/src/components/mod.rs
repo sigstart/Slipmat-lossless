@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Miguel Rincon
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Widgets. Nothing in here talks to the sidecar or to `reqwest` directly —
+//! Widgets. Nothing in here talks to the daemon or to `reqwest` directly —
 //! components receive plain data from `app/mod.rs` and emit intent back (rule 9).
 
 pub mod artwork;
@@ -86,7 +86,7 @@ pub fn current_track() -> CurrentTrack {
     std::rc::Rc::new(std::cell::RefCell::new(None))
 }
 
-/// Catalog ids MusicKit has refused, shared with every row.
+/// Catalog ids Apple has refused, shared with every row.
 ///
 /// Same reasoning as [`CurrentTrack`]: discovering a track is unplayable
 /// happens mid-session, and rebuilding the list to reflect it costs the scroll

@@ -3,9 +3,9 @@
 
 //! Turning a list of rows into a queue.
 //!
-//! Rule 3 lives here: MusicKit owns the queue and we mirror it, so a click
-//! sends the **whole** visible list in one `setQueue` and names its starting
-//! track **by id**. Nearly every function below exists because some earlier
+//! Rule 3 lives here: the daemon owns the queue and clients mirror it, so a
+//! click sends the **whole** visible list in one request and names its
+//! starting track **by id**. Nearly every function below exists because some earlier
 //! version carried an *index* across a filter, a network round trip or a user
 //! action — and started the wrong song.
 //!
@@ -16,24 +16,14 @@
 use crate::entry::Entry;
 use crate::player::protocol::Item;
 
-/// Pull the catalog ids out of MusicKit's `NOT_FOUND` error.
-///
-/// `setQueue` is all-or-nothing: if a single id cannot be resolved it rejects
-/// the whole queue, so one delisted track makes an entire library unplayable.
-/// The error names the offenders:
+/// Pull the catalog ids out of a "could not be resolved" error:
 ///
 /// ```text
 /// [mk-007] NOT_FOUND; One or more items could not be resolved: 1550626760, 1526511025
 /// ```
 ///
-/// Rather than pre-validating every id against the catalog — hundreds of ids
-/// per play, on every play — we let MusicKit tell us, remember them, and retry
-/// without them. Self-healing and free in the common case.
-///
-/// This parses an error *string*, which is exactly the kind of thing rule 4
-/// warns about, so it is deliberately loose: find the marker, then take digit
-/// runs. If Apple rewords the message we get zero ids and fall back to
-/// reporting the error, which is where we started — no worse.
+/// Deliberately loose — find the marker, then take digit runs — so a reworded
+/// message yields no ids and the error is reported as it stands.
 pub fn unresolvable_ids(detail: &str) -> Vec<String> {
     const MARKER: &str = "could not be resolved";
     let Some(tail) = detail.split_once(MARKER).map(|(_, t)| t) else {
@@ -45,18 +35,14 @@ pub fn unresolvable_ids(detail: &str) -> Vec<String> {
         .collect()
 }
 
-/// Build a MusicKit queue from the visible rows, plus **the id to start on**.
+/// Build a queue from the visible rows, plus **the id to start on**.
 ///
-/// The whole visible list is enqueued, never just the clicked track — the
-/// gapless rule (rule 3): MusicKit can only transition seamlessly between items
-/// it already holds.
+/// The whole visible list is enqueued, never just the clicked track (rule 3).
 ///
-/// Note this returns an *id*, not an index. Rows are filtered twice on the way
-/// to a queue — once for tracks with no catalog id, again for ids MusicKit has
-/// rejected — and a retry filters a third time. Carrying an index through that
-/// means re-deriving it at every step and being right every time; carrying the
-/// id means the answer cannot drift. An earlier version did the arithmetic and
-/// started the wrong track once dead ids entered the picture.
+/// Note this returns an *id*, not an index. Rows are filtered on the way to a
+/// queue — tracks with no catalog id, then ids Apple has refused — and an index
+/// carried through those filters drifts. An earlier version did the arithmetic
+/// and started the wrong track once dead ids entered the picture.
 ///
 /// If the clicked track itself can't be streamed, this starts on the first one
 /// after it that can — which is what a person expects from clicking a dead row.
@@ -93,9 +79,6 @@ pub fn queue_from_ids(
         .iter()
         .filter_map(|id| id.clone())
         .filter(alive)
-        // Deduplicate. MusicKit collapses repeats when it builds the queue, so
-        // sending the same id twice makes its queue shorter than ours and every
-        // position after the repeat refers to a different track than we meant.
         .filter(|id| seen.insert(id.clone()))
         .collect();
     let start_id = visible
@@ -125,10 +108,10 @@ pub fn playable_rows(visible: &[Entry], dead: &std::collections::HashSet<String>
         .collect()
 }
 
-/// Whether MusicKit is already holding exactly this set of songs.
+/// Whether the player already holds exactly this set of songs.
 ///
-/// Compared **unordered**: with shuffle on, MusicKit's order is deliberately
-/// not ours, and it is still the same queue. A free function so it can be
+/// Compared **unordered**: a shuffled queue's order is deliberately not ours,
+/// and it is still the same queue. A free function so it can be
 /// tested without building an `AppModel`, which owns GTK widgets.
 pub fn holds(queue: &[Item], songs: &[String]) -> bool {
     if queue.len() != songs.len() {
@@ -154,7 +137,7 @@ pub fn start_index(songs: &[String], start_id: Option<&String>) -> usize {
 
 /// What a queue is **created** in, stated by whoever asked for it.
 ///
-/// Shuffle is a *player* mode in MusicKit, not a property of the queue, so a
+/// Shuffle is a *player* mode, not a property of the queue, so a
 /// queue built while it is on comes out shuffled whatever the caller meant.
 /// Making it a parameter is what stops that (#152).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,7 +164,7 @@ impl Start {
         }
     }
 
-    /// Whether the queue comes back in MusicKit's order rather than ours, which
+    /// Whether the queue comes back in the player's order rather than ours, which
     /// makes "did it start the right track" unanswerable.
     pub fn reorders(self) -> bool {
         matches!(self, Self::Shuffled)
@@ -304,7 +287,7 @@ mod tests {
 
     #[test]
     fn known_dead_ids_never_reach_the_queue_and_do_not_shift_it() {
-        // "2" was rejected by MusicKit on an earlier play. Clicking "c" must
+        // "2" was refused on an earlier play. Clicking "c" must
         // still start "c", not the track above or below it.
         let visible = vec![
             song("a", Some("1")),
@@ -364,8 +347,8 @@ mod tests {
 
     #[test]
     fn a_shuffle_can_start_on_any_streamable_row_and_only_those() {
-        // #147: Shuffle named row 0 every time, so MusicKit pinned track 1 as
-        // the head and shuffled only what came after it.
+        // #147: Shuffle named row 0 every time, so track 1 was pinned as the
+        // head and only what came after it was shuffled.
         let visible = vec![
             song("a", Some("1")),
             song("b", None), // no catalog id
@@ -434,16 +417,15 @@ mod tests {
     fn a_row_click_leaves_the_mode_alone_when_it_only_moves_within_a_queue() {
         // The other half, and the reason this is not just `Some(false)`.
         // Clicking a track in the list already playing is a move, not a new
-        // queue: turning shuffle off there would restore MusicKit's original
-        // order and reorder the queue out from under the track being played.
+        // queue: turning shuffle off there would restore the original order and reorder the queue out from under the track being played.
         // The toggle in the bar owns the mode of a queue that already exists.
         assert_eq!(Start::Clicked.mode(false), None);
     }
 
     #[test]
     fn both_buttons_state_a_mode_either_way() {
-        // These *are* mode requests, so they say so on a queue MusicKit already
-        // holds too — pressing Shuffle on the playlist you are hearing has to
+        // These *are* mode requests, so they say so on a queue already loaded
+        // too — pressing Shuffle on the playlist you are hearing has to
         // shuffle it. Play is the same argument pointed the other way, and it
         // is the one that was already right before this: it has always turned
         // shuffle off, which is what made the row clicks beside it look wrong.
@@ -455,12 +437,8 @@ mod tests {
 
     #[test]
     fn only_a_queue_that_keeps_our_order_is_worth_verifying() {
-        // `verify_start` asks "did MusicKit open on the track we named", and
-        // under shuffle that has no answer: the order comes back MusicKit's, so
-        // the row we named is not the row it opens on and every track is a
-        // legitimate place for a shuffle to start. Asking anyway corrected on
-        // every shuffled play — always to index 0 — which is what interrupted
-        // the load `setQueue` was still running.
+        // "Did it open on the track we named" has no answer under shuffle:
+        // every track is a legitimate place for a shuffle to start.
         assert!(Start::Shuffled.reorders());
         assert!(!Start::Clicked.reorders(), "a click keeps the list's order");
         assert!(!Start::InOrder.reorders(), "so does Play");
@@ -468,9 +446,8 @@ mod tests {
 
     #[test]
     fn the_id_form_and_the_row_form_agree() {
-        // `queue_from` is now `queue_from_ids` with the rows unwrapped, and the
-        // daemon uses the second directly. If they ever disagree, a click in the
-        // GTK app and the same click in a terminal build different queues.
+        // If they ever disagree, a click on rows and the same click on ids
+        // build different queues.
         let visible = vec![song("a", Some("1")), song("b", None), song("c", Some("3"))];
         let ids: Vec<Option<String>> = visible
             .iter()
@@ -500,7 +477,7 @@ mod tests {
         assert_eq!(start_index(&songs, start_id.as_ref()), 0);
     }
 
-    /// A MusicKit queue item, as the mirror holds it.
+    /// A queue item, as the mirror holds it.
     fn item(catalog: &str) -> Item {
         Item {
             occurrence_id: String::new(),
@@ -518,8 +495,7 @@ mod tests {
     #[test]
     fn a_shuffled_queue_is_still_the_same_queue() {
         // The reported bug. Clicking a track in a playlist that is already
-        // playing shuffled must move within that queue, not rebuild it — and
-        // shuffle means MusicKit's order is deliberately not ours.
+        // playing shuffled must move within that queue, not rebuild it.
         let queue = [item("3"), item("1"), item("2")];
         assert!(holds(&queue, &["1".into(), "2".into(), "3".into()]));
     }

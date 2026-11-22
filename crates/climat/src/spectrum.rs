@@ -4,7 +4,7 @@
 //! The bars: what the audio actually looks like.
 //!
 //! **It listens rather than being told.** climat never touches the audio — the
-//! sidecar owns the stream — so this reads a monitor source, the loopback every
+//! FairPlay provider owns the stream — so this reads a monitor source, the loopback every
 //! output exposes. That is how `cava` and every other visualiser works, and it
 //! means the bars follow whatever is playing, including a track the GTK window
 //! started.
@@ -12,7 +12,7 @@
 //! **Asking for one stream is not enough, on PipeWire.**
 //! `pa_stream_set_monitor_stream` narrows a record stream to a single
 //! sink-input, and it is asked for here — measured, the record stream's
-//! `target.object` really is the sidecar's sink-input. `pipewire-pulse` does
+//! `target.object` really is the provider's sink-input. `pipewire-pulse` does
 //! not honour it: with Slipmat paused and silent and another application
 //! playing, the bars still moved. Real PulseAudio does, so the request stays.
 //!
@@ -39,8 +39,8 @@ use libpulse_binding::stream::{
 };
 use rustfft::{FftPlanner, num_complex::Complex};
 
-/// What the sidecar calls itself to the audio server — `app.setName('Slipmat')`
-/// in `main.js`.
+/// What the provider calls itself to the audio server — the context name in
+/// `slipmat-playback/src/pulse.rs`.
 const STREAM: &str = "Slipmat";
 
 /// How many bands are analysed.
@@ -116,7 +116,7 @@ pub fn start() -> Option<tokio::sync::mpsc::Receiver<[f32; BANDS]>> {
 
 /// How long to wait before looking for Slipmat's stream again.
 ///
-/// It comes and goes: the sidecar's sink-input disappears when playback stops
+/// It comes and goes: the provider's sink-input disappears when playback stops
 /// for a while and a new one, with a new index, appears when it resumes. So
 /// this is not startup logic — it is the ordinary state of things.
 const RETRY: std::time::Duration = std::time::Duration::from_millis(700);
@@ -153,7 +153,7 @@ fn listen(tx: tokio::sync::mpsc::Sender<[f32; BANDS]>) {
     }
 }
 
-/// A record stream carrying **only** the sidecar's audio, if it is playing.
+/// A record stream carrying **only** the provider's audio, if it is playing.
 fn follow(main: &mut Mainloop, ctx: &mut Context) -> Option<Stream> {
     let (sink_input, sink) = ask(main, ctx, |info| Some((info.index, info.sink)))?;
     let monitor = monitor_of(main, ctx, sink)?;
@@ -314,7 +314,7 @@ fn pump(main: &mut Mainloop) -> Option<()> {
     }
 }
 
-/// Find the sidecar's sink-input.
+/// Find the provider's sink-input.
 fn ask<T: 'static>(
     main: &mut Mainloop,
     ctx: &Context,

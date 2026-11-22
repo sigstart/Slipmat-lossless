@@ -11,9 +11,8 @@ use tokio::sync::{mpsc, oneshot};
 
 /// A cheap, cloneable handle for sending requests.
 ///
-/// Sends are fire-and-forget into a channel a writer task drains, for the same
-/// reason the sidecar's handle worked that way: `update()` must not await, and
-/// a socket write can block.
+/// Sends are fire-and-forget into a channel a writer task drains: `update()`
+/// must not await, and a socket write can block.
 #[derive(Debug, Clone)]
 pub struct Handle(mpsc::UnboundedSender<(Request, Option<oneshot::Sender<()>>)>);
 

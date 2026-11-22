@@ -31,7 +31,7 @@ impl QueueView {
     /// Where a remembered row is in the queue **now**.
     ///
     /// The position is the key and the id is the check, exactly as
-    /// `app::queue::index_at` does it against MusicKit's own queue: a queue may
+    /// `app::queue::index_at` does it against the live queue: a queue may
     /// hold the same track twice (#88), so an id alone finds the wrong copy —
     /// and if the queue moved since, searching by id is the better wrong answer.
     ///

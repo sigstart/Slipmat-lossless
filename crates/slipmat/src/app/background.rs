@@ -16,8 +16,8 @@ impl AppModel {
     /// getting the default wrong; MPRIS exists precisely so the Shell can drive
     /// playback without a window, and that surface used to vanish with it.
     ///
-    /// But staying resident with nothing loaded would hold the sidecar's ~320 MB
-    /// of Chromium for nothing, so close means one of two things:
+    /// But staying resident with nothing loaded holds a GTK process for
+    /// nothing, so close means one of two things:
     ///
     /// * something is loaded — hide, hold the process open, and keep playing;
     /// * nothing is loaded — quit for real, which is what the button looks like

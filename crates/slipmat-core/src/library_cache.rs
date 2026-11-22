@@ -3,9 +3,8 @@
 
 //! The library, kept between runs so the app opens on it.
 //!
-//! Measured before this existed: ~1.5s of sidecar boot, then ~1.5s of fetching
-//! 534 songs that had not changed since the last launch — about 3.2s of spinner
-//! every time. The songs, albums, artists and playlists are all rederivable
+//! Without it, every launch waited ~1.5s on fetching 534 songs that had not
+//! changed since the last one. The songs, albums, artists and playlists are all rederivable
 //! (Apple will tell us again), so this is a **cache**, beside `unplayable.json`
 //! and the artwork, and never `$XDG_STATE_HOME`.
 //!

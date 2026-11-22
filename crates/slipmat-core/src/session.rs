@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 /// A queue and where in it we were.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
-    /// Catalog ids, in the order they were sent to MusicKit.
+    /// Catalog ids, in queue order.
     pub songs: Vec<String>,
     /// Index into `songs` of the track that was current.
     #[serde(default)]

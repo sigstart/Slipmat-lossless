@@ -83,7 +83,7 @@ pub struct LibraryItem {
     /// stored per-item: a per-item flag has to be changed in the model, and any
     /// model edit costs the scroll position (see `CurrentTrack`).
     pub current: CurrentTrack,
-    /// Ids MusicKit has refused. Consulted at bind, so a track discovered to be
+    /// Ids Apple has refused. Consulted at bind, so a track discovered to be
     /// dead mid-session dims without the list being rebuilt.
     pub dead: DeadTracks,
     /// Favourite and library membership as they are *now*, which is not always

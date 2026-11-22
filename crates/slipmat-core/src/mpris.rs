@@ -60,7 +60,7 @@ use track_list::{Change, Projection};
 /// What a controller on the bus asked for.
 ///
 /// The frontend decides what each one means — a GTK client turns them into
-/// `AppMsg`, a daemon writes them straight to the sidecar. This module only
+/// `AppMsg`, a daemon sends them straight to its queue. This module only
 /// says what was asked.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MprisCommand {
@@ -166,8 +166,7 @@ impl MprisState {
 
     /// MPRIS names the two loop modes after what they loop over, not after how
     /// many times: `Track` is our One, `Playlist` is our All. The queue is the
-    /// list either way — MusicKit has one notion of repeat, not a separate one
-    /// per source.
+    /// list either way — there is one notion of repeat, not one per source.
     fn loop_status(&self) -> LoopStatus {
         match self.repeat {
             RepeatMode::None => LoopStatus::None,

@@ -1,6 +1,10 @@
 # Spec: Climat Apple Music sign-in
 
-- Status: Approved
+- Status: Implemented, then superseded. CLImat still signs in with
+  `climat sign-in`, but the sidecar and Apple's sign-in window are gone: the
+  daemon now takes an Apple Account, password and verification code and passes
+  them to the FairPlay provider. See
+  [SPEC-fairplay-provider.md](SPEC-fairplay-provider.md).
 - Issue: <https://github.com/SoftARV/Slipmat/issues/194>
 - Branch: `feat/climat-sign-in`
 

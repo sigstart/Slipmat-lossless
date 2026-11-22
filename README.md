@@ -24,7 +24,7 @@ FairPlay playback on Linux x86-64 requires a configured provider.
   terminal. Both control the same player state.
 - **Your full library.** Browse and sort songs, albums, artists and playlists.
   Playing a list turns it into the queue.
-- **Gapless playback.** Open the full-size player with its queue and artwork.
+- **A full-size player.** Open the player out, with its queue and artwork.
 - **Desktop controls.** Control playback from the GNOME top bar, lock screen or
   media keys. Music keeps playing after you close the window.
 - **Apple Music search.** Search for artists, albums, playlists and songs, then

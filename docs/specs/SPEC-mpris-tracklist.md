@@ -1,6 +1,8 @@
 # Spec: MPRIS TrackList context
 
-- Status: Approved
+- Status: Implemented (`slipmat-core/src/mpris.rs`). Sidecar references
+  below predate the FairPlay provider; the daemon's own queue now supplies the
+  occurrences.
 - Issue: <https://github.com/SoftARV/Slipmat/issues/191>
 - Branch: `feat/mpris-tracklist`
 

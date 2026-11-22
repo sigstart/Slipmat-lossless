@@ -3,19 +3,17 @@
 
 //! The daemon contract, in one file (rule 9's discipline, a second time).
 //!
-//! Newline-delimited JSON over a Unix socket, the same shape as the sidecar's
-//! protocol and for the same reason: one file holds the whole surface, so a
-//! request and its handler cannot drift apart across a release.
+//! Newline-delimited JSON over a Unix socket. One file holds the whole surface,
+//! so a request and its handler cannot drift apart across a release.
 //!
 //! **Field names are snake_case, tag values are camelCase.** The fields match
 //! the domain types `Entry` carries verbatim — and those are also
 //! `library.json`'s format, so renaming them would silently orphan every
 //! cached library on disk. Tags are names rather than fields: `playPause`.
 //!
-//! **The client sends intent, never state.** `slipmatd` owns the sidecar and
-//! the mirror; a frontend asks for things and is told what happened. That is
-//! rule 3 one hop further out — MusicKit owns the queue, the daemon mirrors it,
-//! and clients mirror the daemon.
+//! **The client sends intent, never state.** `slipmatd` owns the queue and the
+//! provider; a frontend asks for things and is told what happened, and mirrors
+//! the daemon (rule 3).
 
 use serde::{Deserialize, Serialize};
 
@@ -139,13 +137,13 @@ pub fn connect_or_spawn(exe: &std::path::Path) -> std::io::Result<std::os::unix:
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "req")]
 pub enum Request {
-    /// Drive playback. The daemon translates to the sidecar; nothing here says
-    /// what the resulting state will be, because only MusicKit decides that.
+    /// Drive playback. Nothing here says what the resulting state will be,
+    /// because only the daemon decides that.
     #[serde(rename = "transport")]
     Transport(Transport),
 
     /// Move within the queue the daemon already holds. **Not** a way to build
-    /// one — that would cost the gapless buffer (rule 3).
+    /// one — that would restart playback (rule 3).
     #[serde(rename = "jumpTo")]
     JumpTo { index: usize },
 
@@ -222,10 +220,10 @@ pub enum Request {
     #[serde(rename = "open")]
     Open { kind: PageKind, id: String },
 
-    /// Grow the queue MusicKit already holds, without rebuilding it.
+    /// Grow the queue the daemon already holds, without rebuilding it.
     ///
     /// **Not a `Play`**, and that is the point: rebuilding a queue to add a
-    /// track restarts playback and discards the gapless buffer (rule 3).
+    /// track restarts playback (rule 3).
     #[serde(rename = "enqueue")]
     Enqueue {
         ids: Vec<String>,
@@ -264,9 +262,8 @@ pub enum Request {
     #[serde(rename = "play")]
     Play {
         ids: Vec<String>,
-        /// Which of `ids` to open on. Ignored when `start` is `shuffled` —
-        /// MusicKit reorders as it loads, so the row we name is not the row it
-        /// opens on (#152).
+        /// Which of `ids` to open on. Ignored when `start` is `shuffled`,
+        /// because a shuffled queue does not open on the row we name (#152).
         #[serde(default)]
         index: usize,
         #[serde(default)]
@@ -334,9 +331,8 @@ impl CatalogFilter {
 
 /// Something we can ask Apple to do to this account.
 ///
-/// Adding and favouriting go over REST; removing and un-favouriting can only be
-/// done by MusicKit itself, which is why they take different routes out. A
-/// client does not need to know that.
+/// Adding and favouriting go over REST. Removing and un-favouriting have no
+/// route yet and fail with an error, which a client does not need to predict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum WriteAction {
@@ -445,8 +441,8 @@ pub enum Event {
     Snapshot(Snapshot),
 
     /// The queue changed — reordered, replaced, or emptied. Carries the whole
-    /// list: it is bounded by what MusicKit will hold, and a diff protocol here
-    /// would be a second reconciliation to keep honest.
+    /// list: a diff protocol here would be a second reconciliation to keep
+    /// honest.
     #[serde(rename = "queue")]
     Queue {
         items: Vec<QueueItem>,
@@ -513,7 +509,7 @@ pub enum Event {
 /// One row of the queue.
 ///
 /// Not `protocol::Item`, whose doc says it stays inside `player/` — and it
-/// should: that is MusicKit's shape, carrying two id spaces and an artwork
+/// should: that is the player's shape, carrying two id spaces and an artwork
 /// template a client has no business resolving. This is what a row needs to
 /// draw itself and to be jumped to.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -573,7 +569,7 @@ pub enum Stage {
     Connecting,
     /// Ready to play.
     Ready,
-    /// No Apple session. A client cannot fix this — sign-in needs a window.
+    /// No Apple session. A client offers sign-in.
     SignedOut,
     /// Broken in a way a restart will not fix.
     Broken { detail: String },

@@ -44,7 +44,7 @@ pub struct Track {
     /// The resource id. For library items this is a library id (`i.AbCd123`),
     /// which is **not** playable.
     pub id: TrackId,
-    /// The id to hand MusicKit. Library resources carry their catalog
+    /// The id to queue. Library resources carry their catalog
     /// equivalent in `playParams.catalogId`; catalog resources are already
     /// playable by their own id. `None` means a track that exists only in the
     /// user's library (an upload, or something delisted) and cannot be
@@ -781,7 +781,7 @@ mod tests {
     #[test]
     fn a_library_only_upload_is_not_playable() {
         // No catalogId: an upload or a delisted track. It must report itself as
-        // unplayable rather than hand MusicKit a library id that does nothing.
+        // unplayable rather than queue a library id that does nothing.
         let raw = r#"{"data":[{"id":"i.Local1","attributes":{"name":"Demo",
             "playParams":{"id":"i.Local1","kind":"song","isLibrary":true}}}]}"#;
         let parsed: Response<Resource<SongAttributes>> = serde_json::from_str(raw).unwrap();

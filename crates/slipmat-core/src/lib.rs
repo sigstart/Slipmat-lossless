@@ -4,8 +4,8 @@
 //! Everything a client of Apple Music needs that is not drawing.
 //!
 //! No toolkit reaches in here — that is the point of the split. A frontend that
-//! draws nothing at all still needs all of it: the sidecar contract, the child's
-//! lifetime, our mirror of its state, and the catalog client.
+//! draws nothing at all still needs all of it: the daemon contract, the
+//! sign-in wire, our mirror of the player's state, and the catalog client.
 
 pub mod artwork;
 pub mod auth;

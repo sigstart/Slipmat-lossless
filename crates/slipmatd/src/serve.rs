@@ -700,10 +700,8 @@ pub(super) fn fetch_artwork(daemon: &Rc<Daemon>) {
 
 /// Change what Apple holds for this account.
 ///
-/// Two routes out, and the client does not need to know which: adding and
-/// favouriting go over REST, while removing and un-favouriting can only be done
-/// by MusicKit itself — the identical REST calls answer
-/// `400 Insufficient Permissions`.
+/// Adding and favouriting go over REST. Removing and un-favouriting have no
+/// route: the matching REST calls answer `400 Insufficient Permissions`.
 fn write(daemon: &Rc<Daemon>, action: WriteAction, id: String) {
     if matches!(
         action,
@@ -991,11 +989,8 @@ fn open_page(daemon: &Rc<Daemon>, kind: PageKind, id: String) {
     });
 }
 
-/// Build a queue from ids a client drew, and start it.
-///
-/// The arithmetic is `slipmat_core::queue`'s, the same the GTK client uses —
-/// which is the point of it living there. Two implementations would be two
-/// answers to "which song did they click".
+/// Build a queue from ids a client drew, and start it. Dead ids drop out, and
+/// `index` is re-counted past them so it still names the clicked song.
 fn play(daemon: &Daemon, ids: &[String], index: usize) {
     let model = daemon.model.borrow();
     let playable = |id: &&String| !model.dead_ids.contains(*id);

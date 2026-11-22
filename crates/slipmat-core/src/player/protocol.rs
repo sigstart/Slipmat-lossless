@@ -46,7 +46,7 @@ pub enum RepeatMode {
     All,
 }
 
-/// Sidecar → Rust.
+/// Playback events, folded into `PlayerState` by `apply()`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "event")]
 pub enum Event {
@@ -118,47 +118,30 @@ pub enum PlaybackState {
 }
 
 impl PlaybackState {
-    /// What MPRIS calls `PlaybackStatus`, collapsed from MusicKit's ten states.
+    /// What MPRIS calls `PlaybackStatus`, collapsed from the ten states.
     pub fn is_playing(self) -> bool {
         matches!(self, Self::Playing | Self::Seeking)
     }
 
-    /// True while the sidecar is working towards audio — the UI shows a spinner
+    /// True while the player is working towards audio — the UI shows a spinner
     /// rather than a stale "paused".
     pub fn is_busy(self) -> bool {
         matches!(self, Self::Loading | Self::Waiting | Self::Stalled)
     }
 }
 
-/// Why the queue event fired, which the two cases need distinguishing by.
-///
-/// MusicKit subscribes these separately and they mean opposite things. The
-/// sidecar used to collapse both into one `queue` event, and that is what made
-/// a pre-advance indistinguishable from an edit — see [`QueueChange::Position`].
+/// Why the queue event fired. An edit and a cursor move can carry identical
+/// numbers and mean opposite things (#121).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum QueueChange {
-    /// The items changed: something was added, removed, moved or reordered.
-    ///
-    /// **MusicKit does not re-index its own position after one** — measured for
-    /// a removal and for a splice — so this is the case where it has to be told
-    /// where the current track went (#117, #118).
+    /// The items changed: something was added, removed, moved or reordered,
+    /// so the reported index may name the wrong track (#117, #118).
     Items,
-    /// Only the cursor moved, which is MusicKit driving its own queue.
+    /// Only the cursor moved.
     ///
-    /// **The default, deliberately.** Settling is a write to the player at the
-    /// most delicate moment it has, so it happens only when something says an
-    /// edit occurred — never because nothing said otherwise. An older sidecar
-    /// sends no reason at all and lands here, which loses a correction rather
-    /// than inventing one.
-    ///
-    /// Includes the pre-advance MusicKit does a few hundred milliseconds before
-    /// every boundary: it moves the cursor to the next track while
-    /// `now_playing` is still the current one. Reading that as a disagreement
-    /// and putting it back is fighting the thing that makes gapless work, and
-    /// it also meant a command always landed inside the window
-    /// `log_transition` looks over — so the rule 3 check could no longer fail
-    /// (#121).
+    /// **The default, deliberately.** A correction happens only when something
+    /// says an edit occurred — never because nothing said otherwise.
     #[default]
     Position,
 }
@@ -168,33 +151,18 @@ pub enum QueueChange {
 pub struct Queue {
     #[serde(default)]
     pub reason: QueueChange,
-    /// MusicKit's queue position, and it is **signed**: it reports `-1` when a
-    /// queue is loaded but nothing has become current yet. Deserialising this
-    /// as `usize` made serde reject the whole event, so the first `queue` after
-    /// every `setQueue` was silently dropped. Use `index()`, not this field.
+    /// **Signed**: `-1` means a queue is loaded but nothing has become current
+    /// yet. Use `index()`, not this field.
     #[serde(default = "no_position")]
     pub position: i64,
     #[serde(default)]
     pub items: Vec<Item>,
 }
 
-/// Milliseconds from MusicKit, floored at zero.
+/// Milliseconds, floored at zero.
 ///
-/// **MusicKit uses negative numbers as sentinels**, and a bare `u64` turns that
-/// into a rejected line rather than a value. [`Queue::position`] already carries
-/// this lesson — it reports `-1` before anything is current — and it recurred on
-/// a different field: at a track boundary MusicKit reports a negative position,
-///
-/// ```text
-/// {"event":"position","positionMs":-544000,"durationMs":266000}
-/// ```
-///
-/// and serde rejected the whole event, so the position was dropped with a
-/// warning at every transition (#89).
-///
-/// Read as `f64` rather than `i64` so a fractional millisecond is tolerated as
-/// well. The wire has only ever carried integers, but a rejected line is a worse
-/// failure than a rounded one — which is the whole point of this function.
+/// A negative or fractional value must become a number rather than a rejected
+/// event (#89): a rejected line is a worse failure than a rounded one.
 fn ms<'de, D: serde::Deserializer<'de>>(de: D) -> Result<u64, D::Error> {
     let raw = f64::deserialize(de)?;
     Ok(if raw.is_finite() && raw > 0.0 {
@@ -217,13 +185,13 @@ impl Queue {
     }
 }
 
-/// One track as MusicKit sees it. Mapped into `music::types::Track` at the
+/// One queue item. Mapped into `music::types::Track` at the
 /// boundary — this shape stays inside `player/`.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Item {
     /// Process-local identity for this queue occurrence. Equal catalog items
-    /// still have different values; empty means an older sidecar omitted it.
+    /// still have different values; empty means none was assigned.
     #[serde(default)]
     pub occurrence_id: String,
     pub id: Option<String>,
@@ -348,9 +316,8 @@ mod tests {
 
     #[test]
     fn a_queue_position_of_minus_one_parses() {
-        // MusicKit reports -1 between setQueue and the first item becoming
-        // current. Deserialising position as usize rejected the entire event,
-        // so the queue silently never updated.
+        // -1 means loaded but nothing current. Parsing it as usize rejected
+        // the entire event, so the queue silently never updated.
         let raw = r#"{"event":"queue","position":-1,"items":[
             {"id":"1049009209","title":"Roundabout"}]}"#;
         let ev: Event = serde_json::from_str(raw).expect("must not fail to parse");

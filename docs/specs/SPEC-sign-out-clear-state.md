@@ -1,6 +1,8 @@
 # Spec: Clear account state on sign-out
 
-- Status: Approved on 2026-09-02
+- Status: Approved on 2026-09-02; implemented in #197. Sidecar references
+  below predate the FairPlay provider, and the daemon's cleanup path still
+  applies.
 - Branch: `fix/sign-out-clear-state`
 - Supersedes: client-only sign-out cleanup
 

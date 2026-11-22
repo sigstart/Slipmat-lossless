@@ -425,3 +425,6 @@ that.
 - **How long is a lease?** Unknown; it only matters if a lease refresh is ever
   seen to break playback.
 - **Provenance** of Apple's libraries is unchanged by this work and stays open.
+  The origins of `libdrm_client.so`'s sources, including the unverified licence
+  of the part taken from "wrapper", are recorded in
+  [`vendor/adam/drm/README.md`](../../vendor/adam/drm/README.md).

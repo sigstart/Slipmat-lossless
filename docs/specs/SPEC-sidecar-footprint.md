@@ -1,5 +1,8 @@
 # Sidecar footprint experiments
 
+> Obsolete. The Electron sidecar this measured was removed in `600f022`;
+> playback now runs in the FairPlay provider. Kept as a record.
+
 Reduce Slipmat's battery and memory cost without changing MusicKit's ownership
 of playback or the queue. Work on `perf/sidecar-footprint`, in separate commits.
 

@@ -3,8 +3,7 @@
 
 //! What this client believes the player is doing.
 //!
-//! Rule 3, one hop further out. It used to mirror MusicKit through the sidecar;
-//! it now mirrors the daemon, which mirrors MusicKit. **Nothing here is ever
+//! Rule 3, one hop further out: this mirrors the daemon. **Nothing here is ever
 //! written by a click** — a button sends a request and waits to be told, so the
 //! UI can never claim a state the player is not in.
 

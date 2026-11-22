@@ -294,7 +294,7 @@ impl AppModel {
     /// session. Leaving them reachable meant a 403 per second against Apple —
     /// blocking is not a nicety here, it is the correct behaviour.
     ///
-    /// Dismissed from `update` the moment the sidecar reports an authorized
+    /// Dismissed from `update` the moment the daemon reports an authorized
     /// session, never by the user.
     pub(super) fn present_onboarding(
         &self,
@@ -456,8 +456,8 @@ impl AppModel {
     /// Ask before signing out.
     ///
     /// Destructive and not obviously reversible from the user's side: it drops
-    /// Apple's session, so getting back in means the login window again, with
-    /// whatever two-factor prompt that involves. Worth a question.
+    /// Apple's session, so getting back in means the password again, with
+    /// whatever verification code that involves. Worth a question.
     pub(super) fn confirm_sign_out(
         &self,
         sender: &ComponentSender<Self>,

@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Miguel Rincon
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! What's playing next — MusicKit's queue, as a sidebar in the player drawer.
+//! What's playing next — the daemon's queue, as a sidebar in the player drawer.
 //!
-//! **This is a projection** (CLAUDE.md rule 3). MusicKit owns the queue; every
+//! **This is a projection** (CLAUDE.md rule 3). The daemon owns the queue; every
 //! act here sends a command and waits for the echo, and nothing on screen is
 //! authored locally. The one exception is deliberate and lives in the app: a
 //! drag moves the row optimistically, because a drop that springs back while a
@@ -38,7 +38,7 @@ use reconcile::Key;
 use row::{Bound, QueueItem, Shared};
 use slipmat_core::player::protocol::RepeatMode;
 
-/// One queue entry, flattened from the sidecar's view of MusicKit's queue.
+/// One queue entry, flattened from the daemon's queue.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueueEntry {
     /// Where this row sits in the queue the projection was built from.
@@ -46,14 +46,14 @@ pub struct QueueEntry {
     /// **An id alone cannot identify a row.** A queue may legitimately hold the
     /// same track twice — Play Next and Add to Queue are exactly what put it
     /// there — so resolving a click by id found the *first* copy and acted on
-    /// that one instead (#88). The app resolves the pair against MusicKit's
+    /// that one instead (#88). The app resolves the pair against the
     /// live queue: the position says which copy, the id says whether the queue
     /// has moved since.
     pub at: usize,
-    /// MusicKit's id for this item. Not unique within a queue; see `at`.
+    /// The player's id for this item. Not unique within a queue; see `at`.
     pub id: String,
     /// The catalog id, when Apple gave one — **not** `id`, which falls back to
-    /// MusicKit's own when it did not. The two id spaces are not
+    /// the library id when it did not. The two id spaces are not
     /// interchangeable, and this is the only one a catalog lookup accepts, so
     /// "Go to Album" is offered exactly when it is present rather than offered
     /// always and toasting a 404.
@@ -111,7 +111,7 @@ impl Row {
 
 pub struct QueueView {
     list: TypedListView<QueueItem, gtk::NoSelection>,
-    /// MusicKit's queue, in its own order. Mirrored, never authored (rule 3).
+    /// The daemon's queue, in its own order. Mirrored, never authored (rule 3).
     entries: Vec<QueueEntry>,
     /// The queue index the player is on, or `None` when nothing is loaded.
     ///
@@ -224,7 +224,7 @@ pub enum QueueViewOutput {
     },
     /// Empty the queue and stop.
     Clear,
-    /// Reorder the queue MusicKit holds. `to` is the final index.
+    /// Reorder the queue the daemon holds. `to` is the final index.
     Move {
         from: usize,
         to: usize,
@@ -523,7 +523,7 @@ impl Component for QueueView {
             }
             QueueViewInput::RemoveTrack { at, id } => {
                 // Re-resolved rather than passed through: the app checks the
-                // pair against MusicKit's live queue anyway, but handing it a
+                // pair against the live queue anyway, but handing it a
                 // position that is already known to be stale is one more thing
                 // for the fallback to have to rescue.
                 let at = self.entry_index(at, &id).unwrap_or(at);

@@ -6,8 +6,8 @@
 //!
 //! It owns no state of its own beyond what it is told: `app.rs` pushes a
 //! `Snapshot` derived from `PlayerState` (which is itself a mirror of the
-//! sidecar, rule 3), and this component renders it and emits intent back up.
-//! It never talks to the sidecar directly.
+//! daemon, rule 3), and this component renders it and emits intent back up.
+//! It never talks to the daemon directly.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -87,7 +87,7 @@ pub struct Snapshot {
     pub shuffle: bool,
     /// Whether the queue sidebar is open, so the bar's toggle agrees with it.
     pub queue_open: bool,
-    /// Mirrored from MusicKit, never authored here (rule 3).
+    /// Mirrored from the daemon, never authored here (rule 3).
     pub repeat: RepeatMode,
     /// 0.0–1.0. The volume button follows this rather than owning it, so a
     /// change from the keyboard or from MPRIS moves the widget too.
@@ -605,9 +605,7 @@ impl SimpleComponent for NowPlaying {
             NowPlayingInput::Sync(snap) => {
                 let held = self.snap.position_ms;
                 self.snap = *snap;
-                // Straight from the sidecar, all of it. The bar used to defend
-                // the position against a seek of its own that had not come back
-                // yet; it no longer has one to defend. The line only reports,
+                // Straight from the daemon, all of it. The line only reports,
                 // and the drawer's scrubber defends its own drag.
                 let settled = self.snap.position_ms;
 
@@ -621,7 +619,7 @@ impl SimpleComponent for NowPlaying {
                     Base::Keep => {}
                 }
                 if action != Base::Keep {
-                    // The sidecar is authoritative, so a new base resets the
+                    // The daemon is authoritative, so a new base resets the
                     // monotonic floor. Otherwise a stale one survives a track
                     // change and strands the slider mid-song.
                     self.shown_ms.set(settled);
@@ -650,7 +648,7 @@ impl SimpleComponent for NowPlaying {
             NowPlayingInput::ShuffleClicked => {
                 let on = !self.snap.shuffle;
                 // Sent, not stored. The button's own state is a `#[watch]` on
-                // the snapshot, so it snaps back if MusicKit disagrees — the
+                // the snapshot, so it snaps back if the daemon disagrees — the
                 // mirror stays the only source of truth (rule 3).
                 let _ = sender.output(NowPlayingOutput::SetShuffle(on));
             }
@@ -698,11 +696,8 @@ impl SimpleComponent for NowPlaying {
 
         // `gtk_image_set_from_file` does **not** compare — it reloads and
         // re-decodes every time it is called. This function runs on every
-        // snapshot, which is twice a second while playing plus every position
-        // event MusicKit sends, so the unconditional version was decoding the
-        // cover several times a second on the GTK main thread and making the
-        // seek bar stutter. The doc comment above always claimed it only
-        // swapped on change; now it does.
+        // snapshot, twice a second while playing, so decoding unconditionally
+        // made the seek bar stutter on the GTK main thread.
         let mut shown = self.shown_artwork.borrow_mut();
         if *shown != self.artwork {
             match &self.artwork {
@@ -742,9 +737,8 @@ enum Base {
 ///
 /// - **Not playing means no base at all.** Keeping one across a pause made the
 ///   slider jump forward by the pause's length, then snap back.
-/// - **Only rebase on a reading that moved.** MusicKit reports about once a
-///   second against snapshots twice a second; half would anchor to an
-///   unchanged position.
+/// - **Only rebase on a reading that moved.** Position reports are coarser
+///   than snapshots, so many would anchor to an unchanged position.
 fn base_action(playing: bool, settled_ms: u64, held_ms: u64, have_base: bool) -> Base {
     if !playing {
         Base::Clear
@@ -786,7 +780,7 @@ fn advance(base_ms: u64, ahead_ms: u64, duration_ms: u64, last_shown_ms: u64) ->
         raw
     };
 
-    // A clock only runs forwards. MusicKit's reports are not perfectly even,
+    // A clock only runs forwards. Position reports are not perfectly even,
     // and a small backward correction is far more noticeable than being a few
     // tens of milliseconds optimistic — but a *large* jump is a seek or a new
     // track, and must be obeyed.
@@ -1001,7 +995,7 @@ mod tests {
 
     #[test]
     fn a_small_backward_correction_is_absorbed() {
-        // MusicKit reports unevenly; a 200ms step back is far more noticeable
+        // Reports arrive unevenly; a 200ms step back is far more noticeable
         // than being 200ms optimistic, so the slider holds instead.
         assert_eq!(advance(19_800, 0, 180_000, 20_000), 20_000);
     }
@@ -1042,8 +1036,8 @@ mod tests {
 
     #[test]
     fn an_unchanged_reading_keeps_its_base() {
-        // MusicKit reports about once a second; snapshots go out twice a
-        // second. Rebasing the repeats would stall the slider, then leap it.
+        // Snapshots outpace position reports. Rebasing the repeats would
+        // stall the slider, then leap it.
         assert_eq!(base_action(true, 20_000, 20_000, true), Base::Keep);
     }
 

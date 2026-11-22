@@ -19,8 +19,7 @@ pub struct Model {
     /// the daemon serves the library, which is what needs them.
     pub tokens: Option<Tokens>,
     pub library: Library,
-    /// Ids MusicKit has refused. Remembered across runs so the first play of a
-    /// list with a delisted track is not slow twice.
+    /// Ids Apple has refused, from `unplayable.json`; see `unplayable.rs`.
     pub dead_ids: std::collections::HashSet<String>,
     /// The current track's cover on disk, once fetched.
     pub art_path: Option<std::path::PathBuf>,
@@ -58,12 +57,11 @@ impl Model {
 
     /// What a client draws from.
     ///
-    /// `position_ms` is interpolated rather than last-reported: MusicKit reports
-    /// about once a second, and a bar redrawing at that rate visibly steps.
+    /// `position_ms` is interpolated rather than last-reported, so a bar
+    /// redrawing between coarse reports does not visibly step.
     pub fn snapshot(&self) -> Snapshot {
-        // **A queue loaded but never started has no now-playing item** —
-        // MusicKit only sets one when something begins, which is exactly the
-        // state a restored session is in. The queue's own current entry is the
+        // **A queue loaded but never started has no now-playing item**, which
+        // is exactly the state a restored session is in. The queue's own current entry is the
         // honest answer to "what is this player on", and answering it here
         // means no client has to work it out again.
         let item = self.current_item();

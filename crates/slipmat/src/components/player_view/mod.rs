@@ -10,8 +10,8 @@
 //! What they share is deliberate: the same [`Snapshot`] in, the same
 //! [`NowPlayingOutput`] out. The transport here cannot drift from the
 //! transport there, because they are the same messages handled by the same
-//! reducer arms. Anything else would be two players disagreeing about one
-//! MusicKit.
+//! reducer arms. Anything else would be two controls disagreeing about one
+//! player.
 
 use relm4::adw;
 use relm4::adw::prelude::*;
@@ -229,7 +229,7 @@ pub enum PlayerViewInput {
     Scrub(f64),
     /// Only the newest scrub commits — the same generation trick the bar's seek
     /// uses, and for the same reason: dragging emits continuously and every
-    /// intermediate value would be a seek MusicKit has to service.
+    /// intermediate value would be a seek the player has to service.
     ScrubDone(u64, f64),
     PlayPause,
     Next,
@@ -686,7 +686,7 @@ impl SimpleComponent for PlayerView {
                 self.snap.position_ms = v as u64;
                 self.refresh_transport();
                 // Debounced: a drag emits on every motion event, and seeking on
-                // each one would have MusicKit re-buffering continuously.
+                // each one would have the player re-buffering continuously.
                 self.scrub_gen = self.scrub_gen.wrapping_add(1);
                 let generation = self.scrub_gen;
                 let sender = sender.clone();
