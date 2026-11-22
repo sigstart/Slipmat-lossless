@@ -1,5 +1,16 @@
 # Apple Android FairPlay libraries, downloaded locally.
 # Pin each mirror to a commit and review the SHA-256 digests when updating.
+#
+# Provenance (verified 2026-11-22; how to repeat it is in ../README.md):
+#   Apple libs (17, including libc++_shared and libBlocksRuntime): byte-identical
+#     to lib/x86_64/ in Apple Music for Android 3.9.1, versionCode 1187.
+#   libc, libm, liblog, libz, libstdc++: byte-identical to /system/lib64/ in
+#     Google's Android SDK image x86_64-21_r05.zip (Android 5.0.2 / API 21,
+#     SHA-1 9078a095825a69e5e215713f0866c83cef65a342 per Google's index
+#     https://dl.google.com/android/repository/sys-img/android/sys-img2-1.xml).
+#   libandroid, libdl, libOpenSLES are not Android's: they are built locally by
+#     scripts/fairplay/android-stubs.sh and checked by their properties, so they
+#     are not pinned here.
 source https://raw.githubusercontent.com/WorldObservationLog/wrapper/2fd7e0eaef081f93cf687428b965674937832ba4/rootfs/system/lib64
 source https://raw.githubusercontent.com/silentone12725/wrapper/7402034f56dc63e34cea41fb93149d5a6e7c295e/rootfs/system/lib64
 0a575431868e40ddb29e9e0bac7a4993d6e05971b45403cabe358c081b54a36e  libandroidappmusic.so
@@ -24,3 +35,25 @@ f312d563748c1e15cdc3ec3469b16331f7fdaa6ad9b922c7ccbbf1ad38840d02  liblog.so
 6238261363d7943f1a0a27116b52544831f3e295e8533a634641fe5b09d92c7e  libstoreservicescore.so
 41422a7384114f4a98fa7a09e019c9f2aec07c429d6d2ae4b63022b111325109  libxml2.so
 e953e12985e0d756445e49ace84bd7c0e25c48616d3a572b0037a4c920b38e22  libz.so
+#
+# Also in the upstream rootfs, outside lib64, and deliberately not fetched:
+# Slipmat loads Apple's libraries in-process through libhybris, whose own
+# linker (compat/q.so) replaces linker64, and runs with no tzdata (see
+# vendor/adam/drm/drm_hybris.c). Recorded so a launcher that does need them
+# can pin verified copies.
+#   rootfs/system/bin/linker64: byte-identical to Google x86_64-21_r05 /bin/linker64.
+# 85982b4aa9a0a5f24f8c1dca285ba08eb6a5dcdbb9820ac719a7e3c77aa4c737  linker64
+#   rootfs/system/usr/share/zoneinfo/tzdata (WOL commit above): Android-format
+#   compile of IANA tzdata2025c. All 597 zones have rules identical to zic output
+#   from IANA's GPG-signed tzdata2025c.tar.gz (sha256 4aa79e4e...f957, signed by
+#   Paul Eggert, key 7E3792A9D8ACF7D633BC1588ED97E90E62AA7E34), rearguard form,
+#   zic -b fat. 395 zones are byte-identical; the other 202 differ only by an
+#   encoding no-op at 2038-01-19 that older zic adds. Equivalent in rules to (but
+#   not byte-identical with) AOSP's official 2025c file at platform/system/timezone
+#   commit cbd571efcf6b551ba83a31147ec7a06182f8ec31 (tag android-17.0.0_r1),
+#   output_data/iana/tzdata, sha256 bf87968a2297ebe2b43b03a08b7e1ff3d80562f49c0dd1414832ab9c9518ab5c
+#   (gitiles serves it base64 via ?format=TEXT). Google's API 21 copy
+#   (tzdata2014g) would be
+#   39d912cc250447fddb069d7c19823a6db0050c8d93d85d438636be14795c6aea.
+#   The silentone source above does not serve this file.
+# 28d0689618cfb2796a52ba335ab9e535ba68948ad3ecd1a5670e24f762ff2117  tzdata

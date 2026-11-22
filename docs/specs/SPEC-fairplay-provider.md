@@ -29,10 +29,11 @@ in this file's history (`git log --follow docs/specs/SPEC-fairplay-provider.md`)
 Facts that still constrain this work:
 
 - **The library loads and signs in on Linux x86-64.** The 22 Apple libraries are
-  pinned by SHA-256 in `vendor/fairplay/x86_64/fairplay-libs.lock`. The pins
-  show agreement with a mirror. **Apple publisher provenance and redistribution
-  permission are still open**, so the libraries stay local and out of
-  distribution packages.
+  pinned by SHA-256 in `vendor/fairplay/x86_64/fairplay-libs.lock`. Each one is
+  byte-identical to Apple Music for Android 3.9.1 (1187) or Google's
+  `x86_64-21_r05` system image ([provenance](../../vendor/fairplay/README.md#provenance)).
+  **Redistribution permission is still open**, so the libraries stay local and
+  out of distribution packages.
 - **Sign-in goes through Apple unmodified.** Adam's loader rewrote an Apple
   sign-in response about phone verification. The vendored copy does not. The
   provider supports the six-digit code and exits on any other verification
@@ -437,7 +438,9 @@ that.
   network failure ends the track as `stream`. Deferred with network loss above.
 - **How long is a lease?** Unknown; it only matters if a lease refresh is ever
   seen to break playback.
-- **Provenance** of Apple's libraries is unchanged by this work and stays open.
+- **Provenance** of the pinned libraries was verified on 2026-11-22 against
+  official Apple and Google builds; libhybris and redistribution permission
+  remain open ([details](../../vendor/fairplay/README.md#provenance)).
   The origins of `libdrm_client.so`'s sources, including the unverified licence
   of the part taken from "wrapper", are recorded in
   [`vendor/adam/drm/README.md`](../../vendor/adam/drm/README.md).

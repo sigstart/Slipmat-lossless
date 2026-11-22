@@ -23,8 +23,8 @@ LIB64 = rootfs/system/lib64
 
 # libandroid.so, libOpenSLES.so and libdl.so are listed as dependencies by Apple's libraries
 # but nothing is imported from them, so they are built from our own stubs instead of shipping
-# the real ones (which drag in the whole Android graphics/media stack). They are packaged in
-# resources/android-stubs; scripts/fetch-fairplay-libs.sh installs them next to Apple's libraries.
+# the real ones (which drag in the whole Android graphics/media stack). Slipmat's
+# scripts/fairplay/android-stubs.sh builds them with this rule and installs them next to Apple's.
 STUB_DIR = stubs/out
 STUB_LIBS = $(STUB_DIR)/libandroid.so $(STUB_DIR)/libOpenSLES.so $(STUB_DIR)/libdl.so
 STUB_LDFLAGS = -shared -fPIC -nostdlib -O2 -Wl,--hash-style=both

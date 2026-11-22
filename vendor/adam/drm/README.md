@@ -27,8 +27,9 @@ and not all of it was written for Adam.
 | `native/music_token_request.h`, `native/subscription_status.h`, `tests/` | adapted from [silentone12725/apple-music-linux PR #1](https://github.com/silentone12725/apple-music-linux/pull/1), as each file states | not stated in these files |
 | `native/cJSON.*` | cJSON | MIT |
 | `native/dobby.h` | Adam's stub standing in for the Dobby hooking library | — |
+| `stubs/` | Adam's empty stand-ins for `libandroid`, `libOpenSLES` and `libdl`, built by `scripts/fairplay/android-stubs.sh` | not stated in these files |
 | `libhybris-core.so`, `hybris-linker/q.so` | libhybris, built by Adam; Git LFS pointers to binaries, no source here | not stated here |
-| Apple's Android libraries | Apple; staged under `vendor/fairplay/x86_64/`, never in this directory | Apple's; redistribution permission is an open question in the provider spec |
+| Apple's Android libraries | Apple Music for Android 3.9.1 and Google's API 21 image, verified in [`vendor/fairplay/README.md`](../../fairplay/README.md#provenance); staged under `vendor/fairplay/x86_64/`, never in this directory | Apple's and Google's; redistribution permission is an open question in the provider spec |
 
 ### How `main.c` and `import.h` were identified as wrapper's
 

@@ -4,4 +4,5 @@
 
 set -eu
 scripts=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-exec sh "$scripts/fetch-fairplay-libs.sh" "$@"
+sh "$scripts/fetch-fairplay-libs.sh" "$@"
+exec sh "$scripts/fairplay/android-stubs.sh" "$@"
