@@ -417,6 +417,19 @@ void *hybris_open_kd_ctx_from_uri(const char *adam, const char *uri, unsigned *e
     return ctx;
 }
 
+/* ── Refresh ─────────────────────────────────────────────────────────────────*/
+
+extern void refresh_decrypt_ctx(void);
+extern int is_preshare_ctx_ready(void);
+
+int hybris_refresh_keys(void)
+{
+    if (!g_hybris.initialized || !g_hybris.fairplay_inited) return -1;
+    if (drm_lib_is_recovery_active()) return -1; /* the worker is already at it */
+    refresh_decrypt_ctx();
+    return is_preshare_ctx_ready() ? 0 : -1;
+}
+
 /* ── Decryption ──────────────────────────────────────────────────────────────*/
 
 int hybris_backend_decrypt(void *ctx, unsigned epoch, uint8_t *data, uint32_t len)

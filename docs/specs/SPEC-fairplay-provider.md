@@ -59,7 +59,9 @@ Facts that still constrain this work:
 ### Out of scope
 
 - Rewriting `vendor/adam/drm` (C). It is the libhybris loader plus vendored
-  native code, and nothing is gained by porting it.
+  native code, and nothing is gained by porting it. One function is ours:
+  `hybris_refresh_keys` in `drm_hybris.c`, a thin export over the wrapper's own
+  `refresh_decrypt_ctx` (see [Stale key context](#playing-a-track)).
 - Loading FairPlay inside `slipmatd`. See [Why a separate process](#why-a-separate-process).
 - Seeking, gapless playback and prefetching the next track. The streaming design
   makes them possible later; this spec does not deliver them.
@@ -129,13 +131,13 @@ Suggested modules in `fairplay-provider`, sized to the Go they replace:
 
 ### Loading the library: `dlopen`, not link-time
 
-`ffi.rs` opens `/app/libdrm_client.so` with `libc::dlopen` and resolves seven
+`ffi.rs` opens `/app/libdrm_client.so` with `libc::dlopen` and resolves its
 symbols into a table of typed function pointers:
 
 ```
 hybris_backend_init        hybris_fairplay_init       hybris_last_error
 hybris_open_kd_ctx_from_uri hybris_backend_decrypt   drm_lib_get_account
-drm_shutdown
+drm_shutdown               hybris_refresh_keys
 ```
 
 Linking at runtime means `cargo build --workspace`, clippy and CI work on
@@ -222,6 +224,14 @@ For `playTrack { track_id }`:
      change, so `moof` offsets stay valid.
    - **Stale key context.** `HYBRIS_ERR_STALE_CONTEXT` means a lease refresh
      freed the context. Reopen it and retry that sample once.
+   - **Silent expiry.** A key context goes bad about **15 minutes** after it is
+     opened, and nothing says so: no `LEASE_END`, no stale status, and every
+     decrypt still returns 0 while producing noise, which the decoder is the
+     first to notice. So the fairplay thread calls `hybris_refresh_keys` once a
+     track's contexts are **10 minutes** old — a new lease, every cached context
+     dropped, the epoch bumped — and the stale-context retry above reopens each
+     key against a freshly derived context. Reopening without the refresh does
+     nothing: the library hands back the same cached context.
    - **Bounds.** Every size taken from the file is checked against the buffer
      before it is used, because the file comes from the network.
 5. **Output.** Write the clear init and fragments into a bounded in-memory pipe

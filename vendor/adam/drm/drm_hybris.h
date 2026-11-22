@@ -68,6 +68,16 @@ void *hybris_open_kd_ctx_from_uri(const char *adam, const char *uri, unsigned *e
  */
 int hybris_backend_decrypt(void *ctx, unsigned epoch, uint8_t *data, uint32_t len);
 
+/*
+ * Request a new playback lease and drop every cached key context, as the
+ * lease-end recovery does, so the next open derives a fresh one. Every handle
+ * opened before it then reports HYBRIS_ERR_STALE_CONTEXT. A key context goes
+ * bad about 15 minutes after it is opened without the lease manager reporting
+ * anything, so a caller holding one that long refreshes first.
+ * Returns 0 when the rebuilt context is ready, -1 otherwise.
+ */
+int hybris_refresh_keys(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -180,6 +180,7 @@ fn threads() -> Result<usize> {
 
 fn serve(library: Library, inbox: mpsc::Receiver<Job>) {
     let mut keys = Vec::new();
+    let mut refresh = Refresh::new();
     for job in inbox {
         match job {
             Job::Start {
@@ -197,6 +198,7 @@ fn serve(library: Library, inbox: mpsc::Receiver<Job>) {
                 done,
             } => {
                 keys.clear();
+                refresh = Refresh::new();
                 let opened = requests
                     .iter()
                     .enumerate()
@@ -211,6 +213,7 @@ fn serve(library: Library, inbox: mpsc::Receiver<Job>) {
                 mut fragment,
                 done,
             } => {
+                refresh.if_due(&library);
                 let result = match keys.get_mut(key) {
                     Some(key) => key
                         .decrypt(&library, &mut fragment)
@@ -286,6 +289,43 @@ impl KeyContext {
         // SAFETY: the handle came from `hybris_open_kd_ctx_from_uri` with this
         // epoch, and `block` is `len` writable bytes of whole 16-byte blocks.
         Ok(unsafe { (library.decrypt)(self.handle, self.epoch, block.as_mut_ptr(), len) })
+    }
+}
+
+/// When a track's key contexts are next refreshed. Open contexts go bad
+/// about 15 minutes in without the lease manager saying so: fragments
+/// decrypted 912 s after the keys opened failed to decode, three runs out of
+/// three, while those at 897 s and a whole track decrypted in 5 s were fine.
+struct Refresh {
+    due: Instant,
+}
+
+/// A third under the lifetime measured, for one lease request per interval.
+const KEY_REFRESH: Duration = Duration::from_secs(600);
+/// After a refresh that did not take: soon, but not once per fragment.
+const KEY_REFRESH_RETRY: Duration = Duration::from_secs(60);
+
+impl Refresh {
+    fn new() -> Self {
+        Self {
+            due: Instant::now() + KEY_REFRESH,
+        }
+    }
+
+    /// Requests a new lease and drops every cached context once due. The open
+    /// contexts then report stale, and `KeyContext::decrypt` reopens them.
+    fn if_due(&mut self, library: &Library) {
+        if Instant::now() < self.due {
+            return;
+        }
+        // SAFETY: takes no arguments; the library serialises its own state.
+        let ready = unsafe { (library.refresh_keys)() } == 0;
+        self.due = Instant::now()
+            + if ready {
+                KEY_REFRESH
+            } else {
+                KEY_REFRESH_RETRY
+            };
     }
 }
 

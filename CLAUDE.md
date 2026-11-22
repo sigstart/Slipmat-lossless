@@ -608,7 +608,8 @@ looked like nothing happened.
 `0.13.0-dev`, after the move from the Electron player to the FairPlay provider.
 The library, catalog search, the queue, sign-in, session restore and MPRIS work
 through the daemon. Playback through the provider is verified for sign-in and
-restore. Licensed output and licence denial still need live verification. Seek,
+restore, and licensed output plays live — tracks past 21 minutes included, now
+that key contexts are refreshed. Licence denial still needs live verification. Seek,
 shuffle, repeat and gapless transitions are not implemented yet (see
 [Known issues](#known-issues)).
 
@@ -726,8 +727,9 @@ the same as a project with no bugs.
   daemon announces `seek: false, shuffle: false, repeat: false` and drops those
   transport commands. Both clients and MPRIS grey the controls out rather than
   offer ones that lie. A restored session therefore starts its track from 0.
-- **Licensed ALAC output and licence denial** still need a live run (see the
+- **Licence denial** still needs a live run (see the
   [provider spec's live qualification](docs/specs/SPEC-fairplay-provider.md#live-qualification)).
+  Licensed output has had one: hours of it, past the 15-minute key expiry below.
 - **No rate ceiling on client commands** since the sidecar went (#37, below).
 - **Removing library songs and un-favouriting** have no route (see
   [Writing to the library](#writing-to-the-library--verified-against-apples-docs-2026-07-26)).
@@ -751,6 +753,26 @@ because the focus that matters belongs to the `GtkListItemWidget` — GTK's, not
 ours. The corollary is the rule `reconcile.rs` is built on: **a rebuild loses the
 scroll unconditionally**, focus or no focus, so every list edit has to be a
 splice.
+
+**A track over 15 minutes died at the same second every time** — *Thick as a
+Brick*, part 1, at 16:27, three runs in three. FairPlay key contexts go bad
+about 15 minutes after they are opened and **say nothing**: no `LEASE_END`, no
+stale status, every decrypt still returning 0 while producing noise. The first
+thing to notice is the ALAC decoder, on fragment 66's first frame. The fix is
+`hybris_refresh_keys` every 10 minutes (the provider spec's *Silent expiry*).
+
+The code already retried a lease refresh, which is why the first guess — a
+renewal mid-song — was set aside. It was right: that retry fires only when the
+library reports a stale context, and it never does. Reopening a key without the
+refresh is a no-op too, because the library hands back its cached context.
+
+What found it: **`climat check` decrypted the same file in 5 s and it played
+through.** That one comparison moved the question from the file to the clock,
+after a day spent on the file — a skipped key tag, a second sample description,
+samples encrypted in pieces, the CDN — each ruled out by measurement. And the
+wrapper reports every lease event on the provider's stderr, which used to go to
+`/dev/null`; `provider.rs` now forwards an allowlist of the wrapper's own lines,
+because Apple's code shares that stream with free text nobody has read.
 
 A runaway reducer used to have nothing between it and the session (#37) — every dispatch
 journalled, no coalescing, no ceiling, so a message loop cost a disk write and a

@@ -29,6 +29,7 @@ type GetAccount = unsafe extern "C" fn() -> *mut c_char;
 type OpenKeyContext =
     unsafe extern "C" fn(*const c_char, *const c_char, *mut c_uint) -> *mut c_void;
 type Decrypt = unsafe extern "C" fn(*mut c_void, c_uint, *mut u8, u32) -> c_int;
+type RefreshKeys = unsafe extern "C" fn() -> c_int;
 
 /// `hybris_backend_decrypt`: a lease refresh freed the key context.
 pub const STALE_CONTEXT: c_int = -2;
@@ -40,6 +41,7 @@ pub struct Library {
     pub get_account: GetAccount,
     pub open_key_context: OpenKeyContext,
     pub decrypt: Decrypt,
+    pub refresh_keys: RefreshKeys,
 }
 
 impl Library {
@@ -69,6 +71,7 @@ impl Library {
                 get_account: symbol(handle, c"drm_lib_get_account")?,
                 open_key_context: symbol(handle, c"hybris_open_kd_ctx_from_uri")?,
                 decrypt: symbol(handle, c"hybris_backend_decrypt")?,
+                refresh_keys: symbol(handle, c"hybris_refresh_keys")?,
             })
         }
     }
