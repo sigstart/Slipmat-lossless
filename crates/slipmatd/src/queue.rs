@@ -67,9 +67,8 @@ async fn receive(active: &mut Option<Active>) -> Option<Reply> {
 }
 
 impl QueuePlayer {
-    fn items(&mut self, daemon: &Daemon, songs: Vec<String>) -> Vec<Item> {
-        daemon
-            .queue_items(songs)
+    fn number(&mut self, items: Vec<Item>) -> Vec<Item> {
+        items
             .into_iter()
             .map(|mut item| {
                 self.occurrence += 1;
@@ -82,12 +81,12 @@ impl QueuePlayer {
     fn command(&mut self, daemon: &Rc<Daemon>, cmd: Command) {
         match cmd {
             Command::SetQueue {
-                songs,
+                items,
                 start_position,
                 start_playing,
                 ..
             } => {
-                self.items = self.items(daemon, songs);
+                self.items = self.number(items);
                 self.select(daemon, start_position, start_playing);
             }
             Command::ClearQueue => {
@@ -133,7 +132,7 @@ impl QueuePlayer {
     }
 
     fn enqueue(&mut self, daemon: &Rc<Daemon>, songs: Vec<String>, next: bool) {
-        let new = self.items(daemon, songs);
+        let new = self.number(daemon.queue_items(songs));
         let index = if next && !self.items.is_empty() {
             self.index + 1
         } else {

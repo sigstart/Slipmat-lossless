@@ -334,6 +334,11 @@ Two rules the restore follows:
 records `position_ms`, but the provider cannot seek yet, so the restored queue
 starts its current track from the beginning.
 
+**It saves each song's details, not only its id.** The restore runs before the
+library has loaded, so a queue rebuilt from ids alone came back titled by its
+own catalogue numbers — the Now Playing bar showed `693269578`. A queue still
+holding those stand-ins saves no details, so they cannot become permanent.
+
 **A loaded-but-never-started queue has no now-playing item**, and rendering that
 faithfully left the Now Playing bar empty beside a full queue. So `showing()`
 falls back to the queue's own current entry, which is the honest answer to

@@ -327,8 +327,25 @@ pub(super) fn save_session(daemon: &Daemon) {
             .queue_position
             .min(songs.len().saturating_sub(1)),
         position_ms: model.player.position_ms,
+        items: saved_details(&model.player.queue, songs.len()),
         songs,
     });
+}
+
+/// The queue's details, or none when any are the id-titled stand-ins
+/// `queue_items` makes for a song it knows nothing about: saving those would
+/// make every later restore show ids instead of looking the songs up again.
+fn saved_details(queue: &[Item], songs: usize) -> Vec<Item> {
+    let items: Vec<Item> = queue
+        .iter()
+        .filter(|item| item.catalog_id.is_some() || item.id.is_some())
+        .cloned()
+        .collect();
+    let placeholder = |item: &Item| item.catalog_id.as_deref() == Some(item.title.as_str());
+    if items.len() != songs || items.iter().any(placeholder) {
+        return Vec::new();
+    }
+    items
 }
 
 fn clear_playback(daemon: &Daemon) {
@@ -1005,18 +1022,26 @@ fn play(daemon: &Daemon, ids: &[String], index: usize) {
     }
     daemon.send(Command::SetQueue {
         start_position: start_position.min(songs.len() - 1),
-        songs,
+        items: daemon.queue_items(songs),
         start_playing: true,
     });
 }
 
+/// The saved details go with the ids: a restore runs before the library has
+/// loaded, so looking the songs up would find nothing and title them by id.
 fn restore_session(daemon: &Daemon) {
     let Some(session) = slipmat_core::session::load() else {
         return;
     };
     let start = session.start.min(session.songs.len().saturating_sub(1));
+    let items = if session.items.len() == session.songs.len() {
+        session.items
+    } else {
+        // Written before the session kept details.
+        daemon.queue_items(session.songs)
+    };
     daemon.send(Command::SetQueue {
-        songs: session.songs,
+        items,
         start_position: start,
         start_playing: false,
     });
@@ -1248,5 +1273,21 @@ mod tests {
 
         assert_eq!(daemon.art_for.borrow().as_deref(), Some(template));
         assert!(daemon.model.borrow().art_path.is_none());
+    }
+
+    #[test]
+    fn a_queue_of_stand_ins_is_not_saved_as_details() {
+        let daemon = daemon();
+        // Nothing is known yet, as at a restore: the song is titled by its id.
+        let stand_ins = daemon.queue_items(vec!["1440857781".into()]);
+        assert_eq!(stand_ins[0].title, "1440857781");
+        assert!(saved_details(&stand_ins, 1).is_empty());
+
+        let known = vec![Item {
+            catalog_id: Some("1440857781".into()),
+            title: "Roundabout".into(),
+            ..Item::default()
+        }];
+        assert_eq!(saved_details(&known, 1), known);
     }
 }

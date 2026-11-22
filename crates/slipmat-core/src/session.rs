@@ -9,18 +9,24 @@
 //! `settings.ini` next to the theme. `$XDG_STATE_HOME/slipmat/session.json`,
 //! which is exactly what that directory is for.
 //!
-//! Catalog ids are not secrets, so rule 7 is not engaged — there is nothing
-//! here that would matter if someone read the file.
+//! Catalog ids and song titles are not secrets, so rule 7 is not engaged —
+//! there is nothing here that would matter if someone read the file.
 
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+
+use crate::player::protocol::Item;
 
 /// A queue and where in it we were.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     /// Catalog ids, in queue order.
     pub songs: Vec<String>,
+    /// The same songs with their details, because a restore runs before the
+    /// library has loaded. Empty in a file written before this existed.
+    #[serde(default)]
+    pub items: Vec<Item>,
     /// Index into `songs` of the track that was current.
     #[serde(default)]
     pub start: usize,
@@ -91,15 +97,32 @@ mod tests {
 
     #[test]
     fn a_session_survives_the_round_trip() {
+        let item = Item {
+            occurrence_id: "q:7".into(),
+            catalog_id: Some("1440857781".into()),
+            title: "Roundabout".into(),
+            artist: "Yes".into(),
+            duration_ms: 510_000,
+            ..Item::default()
+        };
         let saved = Session {
-            songs: vec!["1440857781".into(), "1440857782".into()],
-            start: 1,
+            songs: vec!["1440857781".into()],
+            items: vec![item.clone()],
+            start: 0,
             position_ms: 42_000,
         };
         let back = parse(&serde_json::to_string(&saved).unwrap()).unwrap();
         assert_eq!(back.songs, saved.songs);
-        assert_eq!(back.start, 1);
+        assert_eq!(back.start, 0);
         assert_eq!(back.position_ms, 42_000);
+        // The details come back; the occurrence id belongs to one process.
+        assert_eq!(
+            back.items,
+            vec![Item {
+                occurrence_id: String::new(),
+                ..item
+            }]
+        );
     }
 
     #[test]
@@ -122,5 +145,6 @@ mod tests {
         let s = parse(r#"{"songs":["1"]}"#).unwrap();
         assert_eq!(s.start, 0);
         assert_eq!(s.position_ms, 0);
+        assert!(s.items.is_empty());
     }
 }

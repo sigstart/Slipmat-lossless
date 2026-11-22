@@ -8,8 +8,10 @@ use serde::{Deserialize, Serialize};
 /// Commands for the daemon's queue.
 #[derive(Debug, Clone)]
 pub enum Command {
+    /// Items rather than ids, resolved by whoever sends it: a restore knows
+    /// details that nothing in the daemon does yet.
     SetQueue {
-        songs: Vec<String>,
+        items: Vec<Item>,
         start_position: usize,
         start_playing: bool,
     },
@@ -187,12 +189,12 @@ impl Queue {
 
 /// One queue item. Mapped into `music::types::Track` at the
 /// boundary — this shape stays inside `player/`.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Item {
     /// Process-local identity for this queue occurrence. Equal catalog items
     /// still have different values; empty means none was assigned.
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub occurrence_id: String,
     pub id: Option<String>,
     pub catalog_id: Option<String>,
