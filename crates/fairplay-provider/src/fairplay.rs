@@ -59,6 +59,7 @@ pub struct Account {
 }
 
 /// A key a track decrypts with: the adam ID it is opened under, and its URI.
+#[derive(Clone)]
 pub struct KeyRequest {
     pub adam: String,
     pub uri: String,

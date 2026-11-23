@@ -308,11 +308,12 @@ impl Drop for Provider {
     }
 }
 
-/// Lines the DRM wrapper writes itself, by prefix: its lease, recovery and key
-/// context reports, whose formats carry fixed words, numbers and catalogue ids.
+/// Lines the DRM wrapper and the provider write themselves, by prefix: lease,
+/// recovery and key reports, whose formats carry fixed words, numbers and
+/// catalogue ids.
 /// Apple's own code shares the stream and is free text that has not been read,
 /// so everything else is dropped rather than risk a credential in the log.
-const NATIVE_LOG: [&str; 7] = [
+const NATIVE_LOG: [&str; 8] = [
     "[recovery] ",
     "[.] LEASE_END ",
     "[.] PLAYBACK_ERROR",
@@ -320,6 +321,7 @@ const NATIVE_LOG: [&str; 7] = [
     "[hybris] wrapper state: ",
     "[hybris] key context ",
     "[guard] ",
+    "[play] key ",
 ];
 
 /// Longer than any line the wrapper writes; a longer one is not one of them.

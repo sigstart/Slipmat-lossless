@@ -48,6 +48,9 @@ use crate::mp4::{AlacConfig, Protection, Shape};
 const AUDIO_SOCKET: &str = "/audio/native";
 const STALL: Duration = Duration::from_secs(30);
 const RETRIES: u32 = 3;
+/// Apple's key server refuses a track key now and then, and grants the same
+/// key minutes later on the same session. A real denial outlasts these.
+const KEY_RETRIES: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(4)];
 /// Fragments buffered ahead of the decoder.
 const PIPE_FRAGMENTS: usize = 4;
 
@@ -177,12 +180,23 @@ impl Player {
                 uri: uri.clone(),
             })
             .collect();
-        match self.fairplay.open_keys(keys).await {
+        match self.open_keys(keys).await {
             Ok(Ok(())) => Ok(media),
             Ok(Err(refused)) if media.keys[refused] != PREFETCH_KEY => Err(Reply::LicenceDenied),
             Ok(Err(_)) => Err(faulted(PlaybackStage::Stream, PlaybackFault::PrefetchKey)),
             Err(_) => Err(faulted(PlaybackStage::Stream, PlaybackFault::Worker)),
         }
+    }
+
+    async fn open_keys(&self, keys: Vec<KeyRequest>) -> Result<Result<(), usize>> {
+        let mut opened = self.fairplay.open_keys(keys.clone()).await;
+        for delay in KEY_RETRIES {
+            let Ok(Err(refused)) = opened else { break };
+            eprintln!("[play] key {refused} refused; retrying in {delay:?}");
+            sleep(delay).await;
+            opened = self.fairplay.open_keys(keys.clone()).await;
+        }
+        opened
     }
 
     async fn stream(
