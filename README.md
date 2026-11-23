@@ -1,5 +1,6 @@
 <!--
 SPDX-FileCopyrightText: 2026 Miguel Rincon
+SPDX-FileCopyrightText: 2026 Jan Vermeulen
 SPDX-License-Identifier: GPL-3.0-or-later
 -->
 
@@ -11,8 +12,14 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 Apple Music for Linux with a native interface.
 
-Slipmat and its terminal client, CLImat, share one daemon and queue. Native
-FairPlay playback on Linux x86-64 requires a configured provider.
+Apple does not ship a Linux client and its web app does not support lossless
+streaming. Slipmat and its terminal client, CLImat, share one daemon and queue.
+Instead of running Chromium or Electron as a sidecar in the background, this
+version of Slipmat features Native FairPlay playback on Linux x86-64.
+
+For a straight-forward packaged version of Slipmat/CLImat with lossy audio
+playback, use [SoftARV's original](https://github.com/SoftARV/Slipmat) from
+which this is forked.
 
 <p align="center">
   <img src="docs/screenshots/library.webp" alt="Slipmat showing a library of songs with the sidebar collapsed: the playing track marked in red, two Apple cannot stream greyed out, a menu button on every row, and the Now Playing bar along the bottom with the playing track's cover behind it">
