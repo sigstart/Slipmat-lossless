@@ -52,10 +52,9 @@ playback dependencies.
 
 Rust edition 2024, plus `anyhow` 1 (rule 5) and `tracing-subscriber` 0.3 with
 `env-filter` for `RUST_LOG`. Toolchain ≥ 1.93 (relm4 0.11's MSRV); libadwaita
-≥ 1.8 / GTK ≥ 4.20 (the `gnome_49` floor). Verified on this machine: rustc
-1.98.0, GTK 4.22.4, libadwaita 1.9.2, PipeWire 1.6.8.
+≥ 1.8 / GTK ≥ 4.20 (the `gnome_49` floor).
 
-**Keep this machine on the same stable CI is.** Nothing pins a toolchain, so
+**Keep this machine on the same stable as CI.** Nothing pins a toolchain, so
 both follow stable — and when they drift, `make check` passes here and the
 identical command fails there, on a lint that does not exist locally. It cost a
 red PR when `clippy::chunks_exact_to_as_chunks` arrived in 1.98 while this
@@ -373,8 +372,8 @@ looked like nothing happened.
 
 ## UI shape
 
-- `adw::ApplicationWindow` > `adw::ToolbarView` > `adw::HeaderBar`, with a
-  **persistent bottom bar** (`add_bottom_bar`) that is the Now Playing strip:
+- `adw::ApplicationWindow` > `adw::ToolbarView` > `adw::HeaderBar`, inside an
+  `adw::BottomSheet` whose **bottom bar** is the Now Playing strip:
   artwork, title + artist, a clock, prev / play-pause / next, and volume, with
   the track's progress as a thin line across the top of the bar. That line is
   **information, not a control** — a scale needs a grabbable handle and room to
@@ -383,8 +382,8 @@ looked like nothing happened.
   insensitive while the daemon reports `PlaybackCapabilities { seek: false }`,
   as do shuffle and repeat. The bar is visible on every page — it is the app.
 - Main content: `adw::NavigationView` over an `adw::ViewStack` (clamped) —
-  **Library** (playlists / albums / songs) and **Search**. The queue is an
-  `adw::Dialog` or a sidebar sheet from the bottom bar, not a page.
+  **Library** (playlists / albums / songs) and **Search**. The queue lives in
+  the drawer the bar opens into, not on a page.
 - Rows are `adw::ActionRow` with artwork as prefix; activating a row sends
   `PlayTrack` with the **whole containing list** as the queue and the row's index
   as `start` — never a single-track queue (rule 3).
@@ -456,7 +455,7 @@ looked like nothing happened.
   ```
 
   Log to a file rather than the journal: a regression can produce thousands of
-  writes before the app stops responding.
+  writes before the app stops responding, and take journald down with it.
 
   Then hold the key down for several seconds and let go. A healthy run is one
   command per change and a **bounded** total — 207 for a long session — and the
@@ -468,9 +467,6 @@ looked like nothing happened.
   that climbs. When a log goes quiet, take a core dump (`ptrace_scope` is 1
   here, so `kill -ABRT` and `coredumpctl debug` — see the wedge recipe in the
   animation section) rather than concluding nothing happened.
-
-  Log to a **file, not the journal** while testing, or a regression takes
-  journald down with it.
 - **A property that drives an `AdwAnimation` is written on an edge, never on a
   level.** This is the trap next door to the one above, and the one above is
   what makes it easy to get wrong: that rule is about a *feedback loop*, and
@@ -605,7 +601,7 @@ looked like nothing happened.
 
 ## Where it is now
 
-`0.13.0-dev`, after the move from the Electron player to the FairPlay provider.
+`0.13.0-dev+alac`, after the move from the Electron player to the FairPlay provider.
 The library, catalog search, the queue, sign-in, session restore and MPRIS work
 through the daemon. Playback through the provider is verified for sign-in and
 restore, and licensed output plays live — tracks past 21 minutes included, now
@@ -628,7 +624,7 @@ conscious choice — then build it if it genuinely earns its place.
 
 ### Lists, and where they live
 
-There are now three kinds of list, and they share their state deliberately:
+Each list keeps its widgets in its own registry, and they share state deliberately:
 
 | List | Registry | Model |
 | --- | --- | --- |
@@ -730,7 +726,10 @@ the same as a project with no bugs.
 - **Licence denial** still needs a live run (see the
   [provider spec's live qualification](docs/specs/SPEC-fairplay-provider.md#live-qualification)).
   Licensed output has had one: hours of it, past the 15-minute key expiry below.
-- **No rate ceiling on client commands** since the sidecar went (#37, below).
+- **No rate ceiling on client commands.** The per-kind ceiling went with the
+  sidecar (#37), so a client message loop reaches the daemon at full rate, a
+  journal write and a bus round trip per lap. Block the handler (UI shape) and
+  count what reaches the mixer.
 - **Removing library songs and un-favouriting** have no route (see
   [Writing to the library](#writing-to-the-library--verified-against-apples-docs-2026-07-26)).
 
@@ -773,14 +772,6 @@ samples encrypted in pieces, the CDN — each ruled out by measurement. And the
 wrapper reports every lease event on the provider's stderr, which used to go to
 `/dev/null`; `provider.rs` now forwards an allowlist of the wrapper's own lines,
 because Apple's code shares that stream with free text nobody has read.
-
-A runaway reducer used to have nothing between it and the session (#37) — every dispatch
-journalled, no coalescing, no ceiling, so a message loop cost a disk write and a
-bus round trip per lap. That is why the `#[watch]` binding bug above reached the
-compositor instead of staying an app bug. The fix was a per-kind rate ceiling
-in `player/sidecar.rs`, and it was deleted with the sidecar. Nothing in the
-daemon replaces it yet, so a client message loop again reaches the daemon at
-full rate. Block the handler (above) and count what reaches the mixer.
 
 ## Commands
 
