@@ -213,8 +213,8 @@ pub(super) fn show_about(parent: &adw::ApplicationWindow) {
         .developer_name("Miguel Rincon")
         .version(env!("CARGO_PKG_VERSION"))
         .license_type(gtk::License::Gpl30)
-        .website("https://github.com/SoftARV/Slipmat")
-        .issue_url("https://github.com/SoftARV/Slipmat/issues")
+        .website("https://github.com/sigstart/Slipmat-lossless")
+        .issue_url("https://github.com/sigstart/Slipmat-lossless/issues")
         // The primary menu carries this too. Both, because the menu is where
         // it is *seen* and About is where somebody goes looking for it.
         .support_url(SUPPORT_URL)

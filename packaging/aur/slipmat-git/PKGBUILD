@@ -6,7 +6,7 @@ _pkgname=slipmat
 pkgver=0.10.0.r0.g0000000
 pkgrel=1
 arch=('x86_64')
-url="https://github.com/SoftARV/Slipmat"
+url="https://github.com/sigstart/Slipmat-lossless"
 license=('GPL-3.0-or-later')
 # `libpulse` is needed to *build*, not only to run: both the daemon and climat
 # link against it. A missing runtime dependency fails at launch; a missing build
