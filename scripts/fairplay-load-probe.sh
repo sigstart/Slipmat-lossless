@@ -11,8 +11,9 @@ fi
 
 repo=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 stage="$repo/vendor/fairplay/x86_64"
+hybris="$repo/vendor/libhybris/x86_64"
 sh "$repo/scripts/fairplay/prepare.sh" --check
-(cd "$stage" && sed -n '/  compat\//p' COMPAT-SHA256SUMS | sha256sum --check --quiet --strict)
+(cd "$repo/vendor/libhybris" && sha256sum --check --quiet --strict SHA256SUMS)
 
 work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
@@ -68,6 +69,6 @@ C
 cd "$work"
 ulimit -c 0
 timeout 12s env -i HOME="$work" PATH=/usr/bin \
-    HYBRIS_LINKER_DIR="$stage/compat" HYBRIS_LD_LIBRARY_PATH="$lib64" \
+    HYBRIS_LINKER_DIR="$hybris" HYBRIS_LD_LIBRARY_PATH="$lib64" \
     HYBRIS_ANDROID_LIB64="$lib64" ANDROID_ROOT="$rootfs/system" \
-    ANDROID_DATA="$work/data" "$work/probe" "$stage/compat/libhybris-core.so"
+    ANDROID_DATA="$work/data" "$work/probe" "$hybris/libhybris-core.so"

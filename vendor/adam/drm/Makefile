@@ -14,9 +14,9 @@ CFLAGS = -Wall -Wextra -Werror -pedantic -std=c11 -fPIC -O2 -g -fno-stack-protec
 HYBRIS_CFLAGS = $(CFLAGS) -Wno-pedantic
 LDFLAGS_LIB = -shared -lpthread -lcrypto -lssl -ldl -lm -lstdc++ -Wl,--no-as-needed -lcurl -Wl,--as-needed -Wl,-z,relro,-z,now
 
-# libhybris-core.so (Git LFS) lives beside the sources; override on the command line to
-# build against another copy.
-HYBRIS_CORE ?= libhybris-core.so
+# Slipmat's checked copy (vendor/libhybris/SHA256SUMS). Builds from a copy of this
+# directory, as scripts/fairplay/build-provider.sh makes, must pass HYBRIS_CORE.
+HYBRIS_CORE ?= ../../libhybris/x86_64/libhybris-core.so
 
 # Android library directory (loaded from disk at runtime)
 LIB64 = rootfs/system/lib64

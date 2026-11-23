@@ -37,7 +37,7 @@ exec bwrap --unshare-all --share-net --die-with-parent --clearenv \
     --ro-bind-try /etc/ssl /etc/ssl --ro-bind-try /etc/ca-certificates /etc/ca-certificates \
     --ro-bind-try /etc/resolv.conf /etc/resolv.conf --ro-bind-try /etc/hosts /etc/hosts \
     --ro-bind-try /etc/nsswitch.conf /etc/nsswitch.conf --ro-bind-try /etc/localtime /etc/localtime \
-    --ro-bind "$stage/rootfs" /state/rootfs --ro-bind "$stage/compat" /app/hybris-linker \
+    --ro-bind "$stage/rootfs" /state/rootfs --ro-bind "$repo/vendor/libhybris/x86_64" /app/hybris-linker \
     --ro-bind "$bundle/libdrm_client.so" /app/libdrm_client.so \
     --ro-bind "$bundle/fairplay-provider" /app/fairplay-provider \
     --ro-bind "$socket" /audio/native --chdir /state/home \

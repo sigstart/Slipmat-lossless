@@ -1,6 +1,5 @@
 /target
 /vendor/fairplay/x86_64/rootfs/
-/vendor/fairplay/x86_64/compat/
 
 # ── DRM client (FairPlay provider) build artifacts ───────────────────────────────
 # Built from drm/ via make; not source.

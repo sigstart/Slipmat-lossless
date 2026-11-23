@@ -38,7 +38,7 @@ e953e12985e0d756445e49ace84bd7c0e25c48616d3a572b0037a4c920b38e22  libz.so
 #
 # Also in the upstream rootfs, outside lib64, and deliberately not fetched:
 # Slipmat loads Apple's libraries in-process through libhybris, whose own
-# linker (compat/q.so) replaces linker64, and runs with no tzdata (see
+# linker (vendor/libhybris/x86_64/q.so) replaces linker64, and runs with no tzdata (see
 # vendor/adam/drm/drm_hybris.c). Recorded so a launcher that does need them
 # can pin verified copies.
 #   rootfs/system/bin/linker64: byte-identical to Google x86_64-21_r05 /bin/linker64.

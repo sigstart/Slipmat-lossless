@@ -28,7 +28,7 @@ and not all of it was written for Adam.
 | `native/cJSON.*` | cJSON | MIT |
 | `native/dobby.h` | Adam's stub standing in for the Dobby hooking library | — |
 | `stubs/` | Adam's empty stand-ins for `libandroid`, `libOpenSLES` and `libdl`, built by `scripts/fairplay/android-stubs.sh` | not stated in these files |
-| `libhybris-core.so`, `hybris-linker/q.so` | libhybris, built by Adam; Git LFS pointers to binaries, no source here | not stated here |
+| libhybris (`libhybris-core.so`, `q.so`) | built by Adam, no source; arrived here as Git LFS pointers and now lives in [`vendor/libhybris/`](../../libhybris/README.md), outside this directory | not stated here |
 | Apple's Android libraries | Apple Music for Android 3.9.1 and Google's API 21 image, verified in [`vendor/fairplay/README.md`](../../fairplay/README.md#provenance); staged under `vendor/fairplay/x86_64/`, never in this directory | Apple's and Google's; redistribution permission is an open question in the provider spec |
 
 ### How `main.c` and `import.h` were identified as wrapper's

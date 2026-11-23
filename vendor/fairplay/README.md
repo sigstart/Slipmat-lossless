@@ -31,9 +31,8 @@ reports to Apple, not where the libraries came from. Nearby releases (3.9.0,
 
 What is not covered:
 
-- **libhybris** (`compat/libhybris-core.so`, `compat/q.so`) is a build Adam
-  made and has no source here. `COMPAT-SHA256SUMS` only checks that you
-  supplied the expected binaries.
+- **libhybris** (`vendor/libhybris/x86_64/`) is a build Adam made and has no
+  source here. Its [README](../libhybris/README.md) records what is known.
 - **The three Android stubs** are not downloaded at all, so they need no
   provenance. `scripts/fairplay/android-stubs.sh` builds `libandroid.so`,
   `libOpenSLES.so` and `libdl.so` from `vendor/adam/drm/stubs/` and refuses
@@ -81,10 +80,9 @@ on private tmpfs under `$XDG_RUNTIME_DIR`, and saves it encrypted with a key in
 Secret Service, reached through `secret-tool`. Without either, sign-in still
 works but is not remembered.
 
-The Adam copies of libhybris and its linker are Git LFS pointers. Supply
-the matching binaries as `x86_64/compat/libhybris-core.so` and
-`x86_64/compat/q.so`. The build checks those against
-`x86_64/COMPAT-SHA256SUMS`, and checks the Android stubs by their properties.
+libhybris and its linker are tracked in `vendor/libhybris/x86_64/`. The build
+checks them against `vendor/libhybris/SHA256SUMS`, and checks the Android stubs
+by their properties.
 
 ```sh
 make fairplay-libs
@@ -106,8 +104,6 @@ the six-digit verification prompt. Other Apple verification dialogs end the
 attempt with an explicit error. Live sign-in and session restore passed.
 Licensed ALAC output and licence denial still need live verification.
 
-The load probe uses the staged Android stubs after checking them. It requires
-separately staged libhybris
-and its Android linker, verified against the loader entries in the
-[compatibility manifest](x86_64/COMPAT-SHA256SUMS). Run
+The load probe uses the staged Android stubs and the tracked libhybris after
+checking both. Run
 `sh scripts/fairplay-load-probe.sh` to check library loading on x86-64.

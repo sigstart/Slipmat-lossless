@@ -43,7 +43,7 @@ modules:
         skip:
           - target
           - vendor/fairplay/x86_64/rootfs
-          - vendor/fairplay/x86_64/compat
+          - vendor/libhybris/x86_64
           - .git
           - packaging/flatpak/.flatpak-builder
           - build-dir

@@ -7,9 +7,10 @@ set -eu
 repo=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 stage="$repo/vendor/fairplay/x86_64"
 adam="$repo/vendor/adam"
+hybris="$repo/vendor/libhybris"
 
 sh "$repo/scripts/fairplay/prepare.sh" --check
-(cd "$stage" && sha256sum --check --quiet --strict COMPAT-SHA256SUMS)
+(cd "$hybris" && sha256sum --check --quiet --strict SHA256SUMS)
 for tool in cargo make bwrap xxd; do
     command -v "$tool" >/dev/null || { echo "Missing build or runtime tool: $tool" >&2; exit 1; }
 done
@@ -36,7 +37,7 @@ trap 'rm -rf -- "$work"; if [ ! -x "$build/launch" ]; then rm -rf -- "$build"; f
 trap 'exit 1' HUP INT TERM
 
 cp -R "$adam/drm" "$work/"
-make -B -C "$work/drm" HYBRIS_CORE="$stage/compat/libhybris-core.so" libdrm_client.so >&2
+make -B -C "$work/drm" HYBRIS_CORE="$hybris/x86_64/libhybris-core.so" libdrm_client.so >&2
 cp "$work/drm/libdrm_client.so" "$repo/target/release/fairplay-provider" "$build/"
 printf '%s\n' "$socket" > "$build/pulse-socket"
 install -m 700 "$repo/scripts/fairplay/launch.sh" "$build/launch"
