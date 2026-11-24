@@ -75,3 +75,7 @@ modules:
           /app/share/icons/hicolor/scalable/apps/dev.miguelrincon.Slipmat.svg
       - install -Dm644 data/icons/hicolor/symbolic/apps/dev.miguelrincon.Slipmat-symbolic.svg
           /app/share/icons/hicolor/symbolic/apps/dev.miguelrincon.Slipmat-symbolic.svg
+      - install -Dm644 data/icons/hicolor/symbolic/apps/dev.miguelrincon.Slipmat-lossless-symbolic.svg
+          /app/share/icons/hicolor/symbolic/apps/dev.miguelrincon.Slipmat-lossless-symbolic.svg
+      - install -Dm644 data/icons/hicolor/symbolic/apps/dev.miguelrincon.Slipmat-lossy-symbolic.svg
+          /app/share/icons/hicolor/symbolic/apps/dev.miguelrincon.Slipmat-lossy-symbolic.svg

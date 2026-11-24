@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-FileCopyrightText: 2026 Jan Vermeulen
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! The encrypted file, as a sequence of top-level boxes, turned into the
@@ -135,7 +136,7 @@ impl Clearer {
 mod tests {
     use super::*;
     use crate::mp4::tests::{boxed, encrypt_like_apple, fake_cipher};
-    use slipmat_playback::AlacDecoder;
+    use slipmat_playback::Decoder;
 
     const CLEAR: &[u8] =
         include_bytes!("../../slipmat-playback/tests/fixtures/stereo-16-fragmented.m4a");
@@ -169,7 +170,7 @@ mod tests {
     }
 
     fn pcm(file: Vec<u8>) -> anyhow::Result<Vec<i32>> {
-        let mut decoder = AlacDecoder::open_fragmented(std::io::Cursor::new(file))?;
+        let mut decoder = Decoder::open_fragmented(std::io::Cursor::new(file))?;
         let mut samples = Vec::new();
         while let Some(block) = decoder.next_block()? {
             samples.extend_from_slice(block);

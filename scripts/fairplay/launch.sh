@@ -40,6 +40,8 @@ exec bwrap --unshare-all --share-net --die-with-parent --clearenv \
     --ro-bind "$stage/rootfs" /state/rootfs --ro-bind "$repo/vendor/libhybris/x86_64" /app/hybris-linker \
     --ro-bind "$bundle/libdrm_client.so" /app/libdrm_client.so \
     --ro-bind "$bundle/fairplay-provider" /app/fairplay-provider \
+    --ro-bind "$bundle/wvhost" /app/wvhost --dir /state/widevine \
+    --ro-bind-try "$repo/vendor/widevine/x86_64/cdm" /app/widevine \
     --ro-bind "$socket" /audio/native --chdir /state/home \
     --setenv HOME /state/home --setenv ANDROID_DATA /state/android-data --setenv LD_LIBRARY_PATH /app \
     -- /app/fairplay-provider "$mode"

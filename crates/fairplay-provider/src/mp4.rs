@@ -1,8 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-FileCopyrightText: 2026 Jan Vermeulen
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Just enough MP4 (ISO/IEC 14496-12) and Common Encryption (23001-7) to turn
-//! Apple's encrypted fragmented ALAC into a clear stream Symphonia can read.
+//! Apple's encrypted fragmented ALAC or AAC into a clear stream Symphonia can
+//! read. FairPlay's streams are `cbcs`, decrypted range by range; Widevine's
+//! are `cenc`, decrypted sample by sample with each sample's IV and map.
 //!
 //! - **The init segment** is rewritten: Symphonia has no `enca` sample entry,
 //!   so the entry takes back its original format from `frma`, loses `sinf`,
@@ -220,6 +223,7 @@ fn name(kind: &FourCc) -> String {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Track {
     pub id: u32,
+    pub scheme: Scheme,
     pub iv_size: u8,
     pub default_sample_size: u32,
     pub default_sample_duration: u32,
@@ -228,6 +232,15 @@ pub struct Track {
     pub configs: [Option<AlacConfig>; 2],
     /// And how each is encrypted, likewise.
     pub protections: [Option<Protection>; 2],
+}
+
+/// The protection scheme a track's `schm` names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scheme {
+    /// AES-CBC with a constant IV: FairPlay.
+    Cbcs,
+    /// AES-CTR with an IV per sample: Widevine.
+    Cenc,
 }
 
 /// A sample description's `tenc`: which key, and how the IV is found. Key ids
@@ -274,7 +287,7 @@ pub fn clear_init(ftyp: Option<&[u8]>, moov: &[u8]) -> Result<(Vec<u8>, Track)> 
         .child_mut(b"stbl")?;
     stbl.children_mut()?
         .retain(|child| !is_encryption_group(child));
-    let (iv_size, (configs, protections)) = clear_sample_entry(stbl.child_mut(b"stsd")?)?;
+    let (scheme, iv_size, (configs, protections)) = clear_sample_entry(stbl.child_mut(b"stsd")?)?;
 
     let (default_sample_duration, default_sample_size) = match moov.child(b"mvex") {
         Some(mvex) => trex_defaults(mvex, id)?,
@@ -291,6 +304,7 @@ pub fn clear_init(ftyp: Option<&[u8]>, moov: &[u8]) -> Result<(Vec<u8>, Track)> 
         out,
         Track {
             id,
+            scheme,
             iv_size,
             default_sample_size,
             default_sample_duration,
@@ -318,9 +332,9 @@ fn is_encryption_group(node: &Node) -> bool {
 /// Every entry's ALAC settings and encryption, for explaining a failure.
 type Described = ([Option<AlacConfig>; 2], [Option<Protection>; 2]);
 
-/// Keeps one sample entry, made clear. Returns the per-sample IV size and
-/// what every entry said.
-fn clear_sample_entry(stsd: &mut Node) -> Result<(u8, Described)> {
+/// Keeps one sample entry, made clear. Returns the scheme, the per-sample IV
+/// size and what every entry said.
+fn clear_sample_entry(stsd: &mut Node) -> Result<(Scheme, u8, Described)> {
     let entries = stsd.children_mut()?;
     match entries.as_slice() {
         [_] => {}
@@ -346,9 +360,20 @@ fn clear_sample_entry(stsd: &mut Node) -> Result<(u8, Described)> {
     let sinf = entry.children_mut()?.remove(sinf_at);
     let original = sinf.child(b"frma").context("sinf has no frma")?.bytes();
     entry.kind = original.try_into().context("invalid frma")?;
-    ensure!(&entry.kind == b"alac", "the track is not ALAC");
-    let scheme = sinf.child(b"schm").context("sinf has no schm")?.bytes();
-    ensure!(scheme.get(4..8) == Some(b"cbcs"), "the track is not cbcs");
+    ensure!(
+        matches!(&entry.kind, b"alac" | b"mp4a"),
+        "the track is neither ALAC nor AAC"
+    );
+    let scheme = match sinf
+        .child(b"schm")
+        .context("sinf has no schm")?
+        .bytes()
+        .get(4..8)
+    {
+        Some(b"cbcs") => Scheme::Cbcs,
+        Some(b"cenc") => Scheme::Cenc,
+        _ => bail!("the track is neither cbcs nor cenc"),
+    };
     let tenc = sinf
         .child(b"schi")
         .and_then(|schi| schi.child(b"tenc"))
@@ -359,7 +384,11 @@ fn clear_sample_entry(stsd: &mut Node) -> Result<(u8, Described)> {
         .get_mut(4..8)
         .context("truncated stsd")?
         .copy_from_slice(&1u32.to_be_bytes());
-    Ok((iv_size, (configs, protections)))
+    ensure!(
+        scheme == Scheme::Cbcs || matches!(iv_size, 8 | 16),
+        "cenc needs an IV per sample"
+    );
+    Ok((scheme, iv_size, (configs, protections)))
 }
 
 /// An entry's `tenc`: full-box header, two reserved or pattern bytes, the
@@ -483,12 +512,24 @@ impl<'a> Fields<'a> {
 const BASE_DATA_OFFSET: u32 = 0x1;
 const DEFAULT_BASE_IS_MOOF: u32 = 0x2_0000;
 
-/// A fragment ready for decryption: `moof` and `mdat` together, and the
-/// byte ranges of it to decrypt, each a whole number of 16-byte blocks.
+/// A fragment ready for decryption: `moof` and `mdat` together, the byte
+/// ranges of it to decrypt as cbcs (each a whole number of 16-byte blocks),
+/// and every sample as cenc needs it.
 pub struct Fragment {
     pub bytes: Vec<u8>,
     pub protected: Vec<Range<usize>>,
+    pub samples: Vec<Sample>,
     pub shape: Shape,
+}
+
+/// One sample as `cenc` decrypts it: where it is in the fragment, its IV
+/// (empty under a constant IV), and its clear/encrypted pieces, empty when
+/// the whole sample is encrypted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sample {
+    pub range: Range<usize>,
+    pub iv: Vec<u8>,
+    pub map: Vec<(u32, u32)>,
 }
 
 /// How a fragment was laid out and encrypted, kept to explain one that fails.
@@ -519,6 +560,7 @@ pub fn fragment(
     let mdat_header = header(mdat)?.context("truncated mdat")?;
     let data = moof.len() + mdat_header.header_len..moof.len() + mdat.len();
     let mut protected = Vec::new();
+    let mut samples = Vec::new();
     let mut shape = Shape::default();
     let mut base_offsets = Vec::new();
     let mut traf_end = 0;
@@ -527,16 +569,17 @@ pub fn fragment(
             continue;
         }
         let traf_at = offset_in(&moof, traf);
-        let samples = traf_samples(&traf[header_len..], track, moof_at, traf_end, &data)?;
-        traf_end = samples.data_end;
-        protected.extend(samples.protected);
-        shape.samples += samples.shape.samples;
-        shape.frames += samples.shape.frames;
-        shape.description = shape.description.max(samples.shape.description);
-        shape.split_samples += samples.shape.split_samples;
-        shape.tfhd_flags |= samples.shape.tfhd_flags;
-        shape.trun_flags |= samples.shape.trun_flags;
-        if let Some(field) = samples.base_data_offset {
+        let found = traf_samples(&traf[header_len..], track, moof_at, traf_end, &data)?;
+        traf_end = found.data_end;
+        protected.extend(found.protected);
+        samples.extend(found.samples);
+        shape.samples += found.shape.samples;
+        shape.frames += found.shape.frames;
+        shape.description = shape.description.max(found.shape.description);
+        shape.split_samples += found.shape.split_samples;
+        shape.tfhd_flags |= found.shape.tfhd_flags;
+        shape.trun_flags |= found.shape.trun_flags;
+        if let Some(field) = found.base_data_offset {
             base_offsets.push(traf_at + header_len + field);
         }
     }
@@ -552,6 +595,7 @@ pub fn fragment(
     Ok(Fragment {
         bytes: moof,
         protected,
+        samples,
         shape,
     })
 }
@@ -562,6 +606,7 @@ fn offset_in(outer: &[u8], inner: &[u8]) -> usize {
 
 struct TrafSamples {
     protected: Vec<Range<usize>>,
+    samples: Vec<Sample>,
     /// Where this traf's sample data ends, relative to the moof's start.
     data_end: usize,
     /// The `base_data_offset` field's position in the traf payload.
@@ -624,6 +669,7 @@ fn traf_samples(
         .transpose()?
         .context("traf has no senc")?;
     let mut protected = Vec::new();
+    let mut encrypted = Vec::new();
     let mut position = base;
     for (_, trun, header_len) in boxes.iter().filter(|(kind, ..)| kind == b"trun") {
         let mut fields = Fields::new(&trun[*header_len..]);
@@ -657,14 +703,17 @@ fn traf_samples(
                 sample.start >= data.start && sample.end <= data.end,
                 "MP4 sample outside its mdat"
             );
-            if subsamples.protect(sample.clone(), &mut protected)? > 1 {
+            let described = subsamples.protect(sample.clone(), &mut protected)?;
+            if described.map.len() > 1 {
                 shape.split_samples += 1;
             }
+            encrypted.push(described);
             position = sample.end;
         }
     }
     Ok(TrafSamples {
         protected,
+        samples: encrypted,
         data_end: position,
         base_data_offset: (flags & BASE_DATA_OFFSET != 0).then_some(base_field),
         shape,
@@ -692,31 +741,45 @@ impl<'a> Senc<'a> {
         })
     }
 
-    /// Adds the protected parts of the next sample, which occupies `sample`,
-    /// and says how many pieces it was encrypted in.
-    fn protect(&mut self, sample: Range<usize>, out: &mut Vec<Range<usize>>) -> Result<u16> {
+    /// Adds the cbcs-protected parts of the next sample, which occupies
+    /// `sample`, and describes it for cenc.
+    fn protect(&mut self, sample: Range<usize>, out: &mut Vec<Range<usize>>) -> Result<Sample> {
         ensure!(self.remaining > 0, "senc has fewer entries than samples");
         self.remaining -= 1;
-        self.fields.take(self.iv_size)?;
+        let iv = self.fields.take(self.iv_size)?.to_vec();
+        let mut map = Vec::new();
         if !self.has_subsamples {
             out.extend(blocks(sample.clone()));
-            return Ok(1);
+            return Ok(Sample {
+                range: sample,
+                iv,
+                map,
+            });
         }
         let mut at = sample.start;
         let pieces = self.fields.u16()?;
         for _ in 0..pieces {
-            let clear = usize::from(self.fields.u16()?);
-            let protected = usize::try_from(self.fields.u32()?)?;
-            let start = at + clear;
-            let end = start + protected;
+            let clear = self.fields.u16()?;
+            let protected = self.fields.u32()?;
+            let start = at + usize::from(clear);
+            let end = start + usize::try_from(protected)?;
             ensure!(
                 end <= sample.end,
                 "MP4 subsample past the end of its sample"
             );
             out.extend(blocks(start..end));
+            map.push((u32::from(clear), protected));
             at = end;
         }
-        Ok(pieces)
+        // A sample's pieces must cover it: whatever follows the last is clear.
+        if at < sample.end {
+            map.push((u32::try_from(sample.end - at)?, 0));
+        }
+        Ok(Sample {
+            range: sample,
+            iv,
+            map,
+        })
     }
 }
 
@@ -914,6 +977,7 @@ pub mod tests {
     fn track() -> Track {
         Track {
             id: 1,
+            scheme: Scheme::Cbcs,
             iv_size: 0,
             default_sample_size: 0,
             default_sample_duration: TREX_DURATION,
@@ -974,6 +1038,51 @@ pub mod tests {
             ]
         );
         assert_eq!(fragment.bytes.len(), moof.len() + mdat.len());
+    }
+
+    #[test]
+    fn cenc_samples_keep_their_iv_and_a_map_that_covers_them() {
+        let mut fields = 2u32.to_be_bytes().to_vec();
+        for (iv, pieces) in [
+            ([1u8; 8], &[(4u16, 36u32)][..]),
+            ([2; 8], &[(0, 20), (2, 10)]),
+        ] {
+            fields.extend_from_slice(&iv);
+            fields.extend_from_slice(&(pieces.len() as u16).to_be_bytes());
+            for (clear, protected) in pieces {
+                fields.extend_from_slice(&clear.to_be_bytes());
+                fields.extend_from_slice(&protected.to_be_bytes());
+            }
+        }
+        let senc = full(b"senc", 0, 0x2, &fields);
+        let parts =
+            |data_offset| moof(&[tfhd_default_base(40), trun(2, data_offset), senc.clone()]);
+        let data_offset = (parts(0).len() + 8) as i32;
+        let moof = parts(data_offset);
+        let mdat = boxed(b"mdat", &[0; 80]);
+        let cenc = Track {
+            scheme: Scheme::Cenc,
+            iv_size: 8,
+            ..track()
+        };
+        let fragment = fragment(moof.clone(), 0, &mdat, &cenc, 0).unwrap();
+        let start = moof.len() + 8;
+        assert_eq!(
+            fragment.samples,
+            vec![
+                Sample {
+                    range: start..start + 40,
+                    iv: vec![1; 8],
+                    map: vec![(4, 36)],
+                },
+                Sample {
+                    range: start + 40..start + 80,
+                    iv: vec![2; 8],
+                    // The last 8 bytes are clear, though senc does not say so.
+                    map: vec![(0, 20), (2, 10), (8, 0)],
+                },
+            ]
+        );
     }
 
     #[test]

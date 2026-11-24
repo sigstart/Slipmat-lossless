@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-FileCopyrightText: 2026 Jan Vermeulen
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Client for the daemon's sign-in endpoint, and the replies the daemon passes
@@ -12,7 +13,7 @@ use tokio::net::{UnixStream, unix::OwnedReadHalf, unix::OwnedWriteHalf};
 use tokio::time::timeout;
 
 use crate::auth_wire::{self as wire, Reader, Request};
-pub use fairplay_wire::{DecodeStep, FragmentShape, PlaybackFault, PlaybackStage};
+pub use fairplay_wire::{DecodeStep, FragmentShape, PlaybackFault, PlaybackStage, StreamCodec};
 
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(130);
 
@@ -30,6 +31,9 @@ pub enum Reply {
     Rejected,
     Expired,
     Failed,
+    Streaming {
+        codec: StreamCodec,
+    },
     Playing,
     Paused,
     Position {
@@ -51,7 +55,10 @@ pub enum Reply {
 
 impl Reply {
     pub fn is_playback_update(self) -> bool {
-        matches!(self, Self::Playing | Self::Paused | Self::Position { .. })
+        matches!(
+            self,
+            Self::Streaming { .. } | Self::Playing | Self::Paused | Self::Position { .. }
+        )
     }
 }
 
@@ -66,6 +73,7 @@ impl From<fairplay_wire::Reply> for Reply {
             Provider::Rejected => Self::Rejected,
             Provider::Failed => Self::Failed,
             Provider::SignedIn { .. } => Self::SignedIn,
+            Provider::Streaming { codec } => Self::Streaming { codec },
             Provider::Playing => Self::Playing,
             Provider::Paused => Self::Paused,
             Provider::Position { position_ms } => Self::Position { position_ms },

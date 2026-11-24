@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-FileCopyrightText: 2026 Jan Vermeulen
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! The persistent Now Playing bar — the thing that makes this an app rather
@@ -16,6 +17,7 @@ use relm4::adw::prelude::*;
 use relm4::{ComponentParts, ComponentSender, SimpleComponent, gtk};
 
 use super::cover::SWAP_MS;
+use slipmat_core::auth::StreamCodec;
 use slipmat_core::music::types::format_duration;
 use slipmat_core::player::protocol::RepeatMode;
 
@@ -100,6 +102,8 @@ pub struct Snapshot {
     /// unreachable, it just stops being reachable from a strip with no room
     /// for it.
     pub narrow: bool,
+    /// What the track streams as, once the provider has chosen.
+    pub codec: Option<StreamCodec>,
 }
 
 impl Default for Snapshot {
@@ -126,8 +130,17 @@ impl Default for Snapshot {
             queue_open: false,
             repeat: RepeatMode::default(),
             volume: 1.0,
+            codec: None,
         }
     }
+}
+
+/// The bar's quality mark: an icon, and the words for its tooltip and name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Quality {
+    icon: &'static str,
+    name: &'static str,
+    tooltip: &'static str,
 }
 
 /// The repeat button's behaviour, on the one repeat type there is.
@@ -433,6 +446,22 @@ impl SimpleComponent for NowPlaying {
                 add_css_class: "caption",
                 add_css_class: "dim-label",
                 set_valign: gtk::Align::Center,
+            },
+            // Whether what you hear is lossless, and it stands down where the
+            // bar is short of room. The words are its tooltip and its name.
+            gtk::Image {
+                add_css_class: "dim-label",
+                set_valign: gtk::Align::Center,
+                #[watch]
+                set_icon_name: model.quality().map(|quality| quality.icon),
+                #[watch]
+                set_tooltip_text: model.quality().map(|quality| quality.tooltip),
+                #[watch]
+                update_property: &[gtk::accessible::Property::Label(
+                    model.quality().map_or("", |quality| quality.name),
+                )],
+                #[watch]
+                set_visible: model.quality().is_some() && !model.snap.narrow,
             },
 
             // --- transport -------------------------------------------------
@@ -861,6 +890,22 @@ impl NowPlaying {
 
     /// `Artist — Album`, collapsing gracefully when either is missing rather
     /// than rendering a stray dash.
+    /// How the track's quality is shown, once the stream is known.
+    fn quality(&self) -> Option<Quality> {
+        Some(match self.snap.codec? {
+            StreamCodec::Alac => Quality {
+                icon: "dev.miguelrincon.Slipmat-lossless-symbolic",
+                name: "Lossless",
+                tooltip: "Lossless: Apple Lossless (ALAC)",
+            },
+            StreamCodec::Aac => Quality {
+                icon: "dev.miguelrincon.Slipmat-lossy-symbolic",
+                name: "AAC",
+                tooltip: "AAC: no lossless version of this song exists, so it plays as 256 kbps AAC",
+            },
+        })
+    }
+
     fn subtitle(&self) -> String {
         match (self.snap.artist.is_empty(), self.snap.album.is_empty()) {
             (false, false) => format!("{} — {}", self.snap.artist, self.snap.album),
@@ -953,6 +998,24 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(m.progress(), 1.0);
+    }
+
+    #[test]
+    fn the_quality_label_waits_for_the_stream() {
+        assert_eq!(model(Snapshot::default()).quality(), None);
+        let lossless = model(Snapshot {
+            codec: Some(StreamCodec::Alac),
+            ..Default::default()
+        });
+        assert_eq!(
+            lossless.quality().map(|quality| quality.name),
+            Some("Lossless")
+        );
+        let aac = model(Snapshot {
+            codec: Some(StreamCodec::Aac),
+            ..Default::default()
+        });
+        assert_eq!(aac.quality().map(|quality| quality.name), Some("AAC"));
     }
 
     #[test]

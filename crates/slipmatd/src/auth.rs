@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-FileCopyrightText: 2026 Jan Vermeulen
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Sign-in sessions, and the provider's one playback slot, which the queue

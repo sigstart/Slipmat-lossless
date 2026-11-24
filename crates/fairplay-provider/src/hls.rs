@@ -1,11 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-FileCopyrightText: 2026 Jan Vermeulen
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The parts of HLS an Apple Music lossless track uses.
+//! The parts of HLS an Apple Music track uses.
 //!
 //! The master playlist lists variants; the ALAC one with the highest
-//! bandwidth wins. Its media playlist is one encrypted fMP4 file, addressed
-//! segment by segment with byte ranges, each under an `EXT-X-KEY`.
+//! bandwidth wins, then AAC-LC. Its media playlist is one encrypted fMP4
+//! file, addressed segment by segment with byte ranges, each under an
+//! `EXT-X-KEY`. A lossy-only track's AAC comes as a media playlist alone.
 //!
 //! **Only the first two keys count**: the shared prefetch key, then the
 //! track's own key, and later key tags are ignored, as Apple's own client
@@ -16,6 +18,7 @@
 use std::ops::Range;
 
 use anyhow::{Context, Result, bail, ensure};
+use fairplay_wire::StreamCodec;
 use reqwest::Url;
 
 /// Opened under adam ID "0" rather than the track's, and cached by the library.
@@ -28,7 +31,19 @@ pub struct Media {
     pub segments: Vec<Segment>,
     /// Distinct key URIs, in the order the segments first use them.
     pub keys: Vec<String>,
+    pub system: KeySystem,
     pub ignored: IgnoredKeys,
+}
+
+/// Who licenses a playlist's keys. A playlist names one or the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeySystem {
+    /// `skd://` keys under `com.apple.streamingkeydelivery`, opened by Apple's
+    /// library: the prefetch key, then the track's.
+    FairPlay,
+    /// One `data:;base64,<key id>` key under `METHOD=ISO-23001-7` (cenc),
+    /// licensed through Google's CDM.
+    Widevine,
 }
 
 /// Later FairPlay key tags naming a key other than the track's. They are
@@ -70,9 +85,14 @@ impl Media {
     }
 }
 
-pub async fn load(client: &reqwest::Client, master: &Url) -> Result<Media> {
-    let variant = best_alac(master, &fetch(client, master).await?)?;
-    parse_media(&variant, &fetch(client, &variant).await?)
+/// The best variant a master offers, and what it is.
+pub async fn load(client: &reqwest::Client, master: &Url) -> Result<(StreamCodec, Media)> {
+    let (codec, variant) = best_variant(master, &fetch(client, master).await?)?;
+    Ok((codec, load_media(client, &variant).await?))
+}
+
+pub async fn load_media(client: &reqwest::Client, media: &Url) -> Result<Media> {
+    parse_media(media, &fetch(client, media).await?)
 }
 
 async fn fetch(client: &reqwest::Client, url: &Url) -> Result<String> {
@@ -92,8 +112,10 @@ async fn fetch(client: &reqwest::Client, url: &Url) -> Result<String> {
     Ok(String::from_utf8(body)?)
 }
 
-pub fn best_alac(base: &Url, playlist: &str) -> Result<Url> {
-    let mut best: Option<(u64, &str)> = None;
+/// The highest-bandwidth ALAC variant, else the highest-bandwidth AAC-LC.
+/// HE-AAC (`mp4a.40.5`) is passed over: the decoder cannot play it.
+pub fn best_variant(base: &Url, playlist: &str) -> Result<(StreamCodec, Url)> {
+    let mut best: Option<(StreamCodec, u64, &str)> = None;
     let mut lines = playlist.lines().map(str::trim);
     while let Some(line) = lines.next() {
         let Some(attributes) = line.strip_prefix("#EXT-X-STREAM-INF:") else {
@@ -106,20 +128,32 @@ pub fn best_alac(base: &Url, playlist: &str) -> Result<Url> {
             break;
         };
         let attributes = parse_attributes(attributes);
-        let is_alac = attribute(&attributes, "CODECS").is_some_and(|codecs| {
-            codecs
-                .split(',')
-                .any(|codec| codec.trim().eq_ignore_ascii_case("alac"))
-        });
+        let has = |wanted: &str| {
+            attribute(&attributes, "CODECS").is_some_and(|codecs| {
+                codecs
+                    .split(',')
+                    .any(|codec| codec.trim().eq_ignore_ascii_case(wanted))
+            })
+        };
+        let codec = if has("alac") {
+            StreamCodec::Alac
+        } else if has("mp4a.40.2") {
+            StreamCodec::Aac
+        } else {
+            continue;
+        };
         let bandwidth = attribute(&attributes, "BANDWIDTH")
             .and_then(|value| value.parse().ok())
             .unwrap_or(0);
-        if is_alac && best.is_none_or(|(highest, _)| bandwidth > highest) {
-            best = Some((bandwidth, uri));
+        let better = best.is_none_or(|(chosen, highest, _)| {
+            (codec.is_lossless(), bandwidth) > (chosen.is_lossless(), highest)
+        });
+        if better {
+            best = Some((codec, bandwidth, uri));
         }
     }
-    let (_, uri) = best.context("the track has no ALAC variant")?;
-    https(base.join(uri)?)
+    let (codec, _, uri) = best.context("the track has no ALAC or AAC-LC variant")?;
+    Ok((codec, https(base.join(uri)?)?))
 }
 
 pub fn parse_media(base: &Url, playlist: &str) -> Result<Media> {
@@ -135,12 +169,37 @@ pub fn parse_media(base: &Url, playlist: &str) -> Result<Media> {
     let mut duration_ms = 0;
     let mut track_uri: Option<String> = None;
     let mut named = None;
+    let mut system = None;
     for line in playlist.lines().map(str::trim) {
         if let Some(attributes) = line.strip_prefix("#EXT-X-KEY:") {
             let attributes = parse_attributes(attributes);
             let fairplay = attribute(&attributes, "KEYFORMAT")
                 .is_some_and(|format| format.contains("streamingkeydelivery"));
-            if !fairplay {
+            let widevine = attribute(&attributes, "METHOD") == Some("ISO-23001-7");
+            let this = match (fairplay, widevine) {
+                (true, _) => KeySystem::FairPlay,
+                (false, true) => KeySystem::Widevine,
+                (false, false) => continue,
+            };
+            ensure!(
+                system.is_none_or(|known| known == this),
+                "the playlist names both FairPlay and Widevine keys"
+            );
+            system = Some(this);
+            if this == KeySystem::Widevine {
+                let uri = attribute(&attributes, "URI").context("EXT-X-KEY without a URI")?;
+                ensure!(uri.starts_with("data:"), "the Widevine key is not inline");
+                match keys.first() {
+                    None => keys.push(uri.to_owned()),
+                    Some(known) if known == uri => {}
+                    Some(_) => {
+                        ignored.count = ignored.count.saturating_add(1);
+                        ignored.first_at_ms.get_or_insert(elapsed_ms);
+                        continue;
+                    }
+                }
+                key = Some(0);
+                named = Some(NamedKey::Track);
                 continue;
             }
             let uri = attribute(&attributes, "URI").context("EXT-X-KEY without a URI")?;
@@ -197,6 +256,7 @@ pub fn parse_media(base: &Url, playlist: &str) -> Result<Media> {
         file: file.context("the media playlist has no file")?,
         segments,
         keys,
+        system: system.context("the media playlist names no key")?,
         ignored,
     })
 }
@@ -277,17 +337,25 @@ mod tests {
     }
 
     #[test]
-    fn the_highest_bandwidth_alac_variant_wins() {
+    fn the_highest_bandwidth_alac_variant_wins_then_aac_lc() {
         let master = "#EXTM3U\n\
             #EXT-X-STREAM-INF:BANDWIDTH=273335,CODECS=\"mp4a.40.2\"\naac.m3u8\n\
             #EXT-X-STREAM-INF:BANDWIDTH=5552204,CODECS=\"alac\"\nhires.m3u8\n\
             #EXT-X-STREAM-INF:BANDWIDTH=1549788,CODECS=\"alac\"\ncd.m3u8\n";
+        let (codec, url) = best_variant(&base(), master).unwrap();
+        assert_eq!(codec, StreamCodec::Alac);
         assert_eq!(
-            best_alac(&base(), master).unwrap().as_str(),
+            url.as_str(),
             "https://aod.itunes.apple.com/itunes-assets/x/hires.m3u8"
         );
-        let aac_only = "#EXT-X-STREAM-INF:BANDWIDTH=1,CODECS=\"mp4a.40.2\"\naac.m3u8\n";
-        assert!(best_alac(&base(), aac_only).is_err());
+        let lossy = "#EXT-X-STREAM-INF:BANDWIDTH=137867,CODECS=\"mp4a.40.2\"\n128.m3u8\n\
+            #EXT-X-STREAM-INF:BANDWIDTH=270134,CODECS=\"mp4a.40.2\"\n256.m3u8\n\
+            #EXT-X-STREAM-INF:BANDWIDTH=900000,CODECS=\"mp4a.40.5\"\nhe.m3u8\n";
+        let (codec, url) = best_variant(&base(), lossy).unwrap();
+        assert_eq!(codec, StreamCodec::Aac);
+        assert!(url.as_str().ends_with("/256.m3u8"));
+        let he_only = "#EXT-X-STREAM-INF:BANDWIDTH=1,CODECS=\"mp4a.40.5\"\nhe.m3u8\n";
+        assert!(best_variant(&base(), he_only).is_err());
     }
 
     const KEY: &str =
@@ -396,6 +464,25 @@ mod tests {
                 first_at_ms: Some(20_000)
             }
         );
+    }
+
+    #[test]
+    fn a_widevine_playlist_has_one_inline_key() {
+        let key = "#EXT-X-KEY:METHOD=ISO-23001-7,URI=\"data:;base64,AAAAAF1Xlu4AHf0Hv2PysA==\"\n";
+        let playlist = [
+            "#EXTM3U\n".to_owned(),
+            key.to_owned(),
+            "#EXT-X-MAP:URI=\"track.mp4\",BYTERANGE=\"1338@0\"\n".to_owned(),
+            segment("100@1338"),
+            segment("100"),
+        ]
+        .concat();
+        let media = parse_media(&base(), &playlist).unwrap();
+        assert_eq!(media.system, KeySystem::Widevine);
+        assert_eq!(media.keys, vec!["data:;base64,AAAAAF1Xlu4AHf0Hv2PysA=="]);
+        assert!(media.segments.iter().all(|segment| segment.key == 0));
+        let mixed = [playlist.clone(), self::key(PREFETCH_KEY), segment("100")].concat();
+        assert!(parse_media(&base(), &mixed).is_err());
     }
 
     #[test]

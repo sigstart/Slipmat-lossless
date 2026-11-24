@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-FileCopyrightText: 2026 Jan Vermeulen
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! The thread that owns every call into the FairPlay libraries.
@@ -82,6 +83,8 @@ enum Job {
         fragment: Fragment,
         done: oneshot::Sender<Result<(Fragment, Duration), PlaybackFault>>,
     },
+    /// Requests a new lease and drops every key context, now.
+    RenewLease(oneshot::Sender<bool>),
 }
 
 pub struct Fairplay {
@@ -163,6 +166,17 @@ impl Fairplay {
         result.await.map_err(|_| PlaybackFault::Worker)?
     }
 
+    /// Renews the session's playback lease. A Widevine licence makes the web
+    /// player's session the account's active one, and Apple then refuses new
+    /// FairPlay keys to this one until it asks again. True when it took.
+    pub async fn renew_lease(&self) -> bool {
+        let (done, result) = oneshot::channel();
+        if self.send(Job::RenewLease(done)).is_err() {
+            return false;
+        }
+        result.await.unwrap_or(false)
+    }
+
     fn send(&self, job: Job) -> Result<()> {
         self.jobs
             .send(job)
@@ -208,6 +222,9 @@ fn serve(library: Library, inbox: mpsc::Receiver<Job>) {
                         Ok(())
                     });
                 let _ = done.send(opened);
+            }
+            Job::RenewLease(done) => {
+                let _ = done.send(refresh.now(&library));
             }
             Job::Decrypt {
                 key,
@@ -316,9 +333,13 @@ impl Refresh {
     /// Requests a new lease and drops every cached context once due. The open
     /// contexts then report stale, and `KeyContext::decrypt` reopens them.
     fn if_due(&mut self, library: &Library) {
-        if Instant::now() < self.due {
-            return;
+        if Instant::now() >= self.due {
+            self.now(library);
         }
+    }
+
+    /// Refreshes now and says whether the rebuilt context is ready.
+    fn now(&mut self, library: &Library) -> bool {
         // SAFETY: takes no arguments; the library serialises its own state.
         let ready = unsafe { (library.refresh_keys)() } == 0;
         self.due = Instant::now()
@@ -327,6 +348,7 @@ impl Refresh {
             } else {
                 KEY_REFRESH_RETRY
             };
+        ready
     }
 }
 

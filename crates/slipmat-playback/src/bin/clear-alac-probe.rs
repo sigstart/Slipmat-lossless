@@ -10,7 +10,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use slipmat_playback::{AlacDecoder, PulseOutput};
+use slipmat_playback::{Decoder, PulseOutput};
 
 const USAGE: &str = "Usage: clear-alac-probe <track.m4a> [<track.m4a> ...]";
 
@@ -77,7 +77,7 @@ fn play(first: PathBuf, mut paths: impl Iterator<Item = PathBuf>) -> Result<()> 
 
 struct PreparedTrack {
     path: PathBuf,
-    decoder: AlacDecoder,
+    decoder: Decoder,
     first_block: Vec<i32>,
 }
 
@@ -92,14 +92,14 @@ impl PreparedTrack {
         })
     }
 
-    fn prepare(path: &Path) -> Result<(AlacDecoder, Vec<i32>)> {
+    fn prepare(path: &Path) -> Result<(Decoder, Vec<i32>)> {
         ensure!(
             fs::metadata(path)?.is_file(),
             "expected a regular local file"
         );
         let file = File::open(path)?;
         ensure!(file.metadata()?.is_file(), "expected a regular local file");
-        let mut decoder = AlacDecoder::open(Box::new(file))?;
+        let mut decoder = Decoder::open(Box::new(file))?;
         let first_block = decoder
             .next_block()?
             .context("ALAC track is empty")?

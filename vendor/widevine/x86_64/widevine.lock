@@ -1,0 +1,15 @@
+# Google's Widevine CDM, which plays the AAC of songs Apple has no lossless
+# master for. It is Google's, not open source, and its licence forbids
+# redistributing it, so it is fetched on request, never packaged, and never by
+# `make install`: `make widevine` runs scripts/fetch-widevine.sh. The component
+# comes from Google's own release server, the one Chrome's updater uses, and
+# both it and the library inside it must match these SHA-256 digests.
+#
+# To bump: take the new component URL Chrome's updater offers for app id
+# oimompecagnajdejgnnjijobebaeigek (the chromium-widevine AUR package records
+# it), then regenerate both digests. Google revokes old versions, so a CDM that
+# stops getting licences usually wants this.
+version 4.10.3112.0
+source https://www.google.com/dl/release2/chrome_component/acqexsh26ysyu3zxeotqtsp63idq_4.10.3112.0/oimompecagnajdejgnnjijobebaeigek_4.10.3112.0_linux64_ad7kyx4q7wx7xknykmkbonbbmnwq.crx3
+1bf1f200dcccd461b2d029d000d0fcf800f0571c932db31467b9d5d301e0a98f  component.crx3
+cd250e8177183add7029ccc3057217b978779f9c7af800c45083f3cc0139020e  libwidevinecdm.so

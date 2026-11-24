@@ -1017,8 +1017,8 @@ impl App {
                 self.message = Some(Notice::bad(detail));
             }
             Event::PlaybackFailed { detail } => self.message = Some(Notice::bad(detail)),
-            // The answer to `climat check`, for the terminal that asked.
-            Event::Checked { .. } => {}
+            // The answers to `climat check` and `info`, for the terminal that asked.
+            Event::Checked { .. } | Event::Inspected { .. } => {}
         }
     }
 }

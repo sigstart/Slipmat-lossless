@@ -77,7 +77,8 @@ the state belongs in a model and the change belongs in an `update()`.
 
 Playback requires an active Apple Music subscription and valid licences.
 Slipmat may use Apple's Android playback libraries through libhybris, a
-compatibility layer for Android code. The playback backend can decode and
+compatibility layer for Android code, and Google's Widevine CDM for songs with
+no lossless master, hosted the way a browser hosts it. The playback backend can decode and
 buffer audio in memory for immediate output. GTK, CLImat, and other clients
 exchange playback commands, metadata, and status with the backend.
 
@@ -605,7 +606,9 @@ looked like nothing happened.
 The library, catalog search, the queue, sign-in, session restore and MPRIS work
 through the daemon. Playback through the provider is verified for sign-in and
 restore, and licensed output plays live — tracks past 21 minutes included, now
-that key contexts are refreshed. Licence denial still needs live verification. Seek,
+that key contexts are refreshed. Licence denial still needs live verification. Songs with no lossless master
+play as 256 kbps AAC through Google's Widevine CDM, which is opt-in
+(`make widevine`); the bar says Lossless or AAC. Seek,
 shuffle, repeat and gapless transitions are not implemented yet (see
 [Known issues](#known-issues)).
 
@@ -730,6 +733,9 @@ the same as a project with no bugs.
   sidecar (#37), so a client message loop reaches the daemon at full rate, a
   journal write and a bus round trip per lap. Block the handler (UI shape) and
   count what reaches the mixer.
+- **Google's terms forbid using the Widevine CDM without an agreement with
+  Google.** It is fetched only on request and never packaged; see the
+  [provider spec](docs/specs/SPEC-fairplay-provider.md#songs-with-no-lossless-master-widevine-aac).
 - **Removing library songs and un-favouriting** have no route (see
   [Writing to the library](#writing-to-the-library--verified-against-apples-docs-2026-07-26)).
 
@@ -777,6 +783,7 @@ because Apple's code shares that stream with free text nobody has read.
 
 ```bash
 sh scripts/fairplay/prepare.sh  # fetch and verify the FairPlay libraries
+make widevine                   # opt-in: Google's CDM, for songs with no lossless master
 cargo build --locked --workspace
 target/debug/slipmat
 target/debug/climat

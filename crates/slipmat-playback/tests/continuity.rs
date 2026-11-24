@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-FileCopyrightText: 2026 Jan Vermeulen
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::io::{self, Cursor, Read};
 
-use slipmat_playback::{AlacDecoder, DecodeStep, PcmFormat, Undecodable};
+use slipmat_playback::{DecodeStep, Decoder, PcmFormat, Undecodable};
 
 const STEREO_16: &[u8] = include_bytes!("fixtures/stereo-16.m4a");
 const STEREO_16_NEXT: &[u8] = include_bytes!("fixtures/stereo-16-next.m4a");
@@ -11,8 +12,8 @@ const STEREO_24: &[u8] = include_bytes!("fixtures/stereo-24.m4a");
 const STEREO_16_FRAGMENTED: &[u8] = include_bytes!("fixtures/stereo-16-fragmented.m4a");
 const STANDARD_PACKET_FRAMES: usize = 4096;
 
-fn open(bytes: &'static [u8]) -> AlacDecoder {
-    AlacDecoder::open(Box::new(Cursor::new(bytes))).unwrap()
+fn open(bytes: &'static [u8]) -> Decoder {
+    Decoder::open(Box::new(Cursor::new(bytes))).unwrap()
 }
 
 fn check_frames(block: &[i32], start: usize, frames: usize, depth: u8, steps: [i32; 2]) {
@@ -110,7 +111,7 @@ fn streams_exact_pcm_across_non_seekable_fragments() {
         }
     }
 
-    let mut decoder = AlacDecoder::open_fragmented(ShortReads(STEREO_16_FRAGMENTED)).unwrap();
+    let mut decoder = Decoder::open_fragmented(ShortReads(STEREO_16_FRAGMENTED)).unwrap();
 
     assert_eq!(
         decoder.format(),
@@ -151,7 +152,7 @@ fn rejects_truncated_fragmented_streams() {
         &STEREO_16_FRAGMENTED[..STEREO_16_FRAGMENTED.len() - 1],
         &partial_header,
     ] {
-        let mut decoder = AlacDecoder::open_fragmented(Cursor::new(input.to_vec())).unwrap();
+        let mut decoder = Decoder::open_fragmented(Cursor::new(input.to_vec())).unwrap();
         assert!(decoder.next_block().unwrap().is_some());
         loop {
             match decoder.next_block() {
@@ -181,7 +182,7 @@ fn a_corrupt_frame_is_an_audio_failure_after_the_audio_before_it() {
     for byte in &mut input[last_mdat..] {
         *byte = 0x40;
     }
-    let mut decoder = AlacDecoder::open_fragmented(Cursor::new(input)).unwrap();
+    let mut decoder = Decoder::open_fragmented(Cursor::new(input)).unwrap();
     let error = loop {
         match decoder.next_block() {
             Ok(Some(_)) => {}
@@ -208,7 +209,7 @@ fn a_corrupt_frame_is_an_audio_failure_after_the_audio_before_it() {
 #[test]
 fn invalid_input_fails_while_opening_the_decoder() {
     for input in [&[][..], b"invalid M4A stream", STEREO_16] {
-        let Err(error) = AlacDecoder::open_fragmented(Cursor::new(input.to_vec())) else {
+        let Err(error) = Decoder::open_fragmented(Cursor::new(input.to_vec())) else {
             panic!("opened {} bytes of invalid input", input.len());
         };
         assert!(format!("{error:#}").contains("reading MP4"), "{error:#}");

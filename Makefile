@@ -15,7 +15,7 @@ CLIMAT   = dev.miguelrincon.Climat
 ICON_SIZES = 16 32 48 64 128 256 512
 
 .PHONY: all build run test check gapless footprint install \
-        dev-install fairplay-libs fairplay-provider uninstall clean flatpak flatpak-bundle aur aur-publish
+        dev-install fairplay-libs widevine fairplay-provider uninstall clean flatpak flatpak-bundle aur aur-publish
 all: build
 
 build:
@@ -89,6 +89,10 @@ aur-publish:
 fairplay-libs:
 	sh scripts/fairplay/prepare.sh
 
+# Opt-in: Google's CDM, for songs Apple has no lossless master for.
+widevine:
+	sh scripts/fetch-widevine.sh
+
 fairplay-provider: fairplay-libs
 	sh scripts/fairplay/build-provider.sh
 
@@ -112,6 +116,10 @@ dev-install:
 		$(DATADIR)/icons/hicolor/scalable/apps/$(CLIMAT).svg
 	install -Dm644 data/icons/hicolor/symbolic/apps/$(APPID)-symbolic.svg \
 		$(DATADIR)/icons/hicolor/symbolic/apps/$(APPID)-symbolic.svg
+	@for icon in lossless lossy; do \
+		install -Dm644 data/icons/hicolor/symbolic/apps/$(APPID)-$$icon-symbolic.svg \
+			$(DATADIR)/icons/hicolor/symbolic/apps/$(APPID)-$$icon-symbolic.svg; \
+	done
 	@# Raster sizes, rendered from the same SVG the app installs so the two
 	@# can never drift. GTK resolves the SVG on its own, but the shell, the
 	@# notification daemon and anything reading the icon theme without an SVG
@@ -146,6 +154,8 @@ uninstall:
 	rm -f $(DATADIR)/icons/hicolor/scalable/apps/$(APPID).svg
 	rm -f $(DATADIR)/icons/hicolor/scalable/apps/$(CLIMAT).svg
 	rm -f $(DATADIR)/icons/hicolor/symbolic/apps/$(APPID)-symbolic.svg
+	rm -f $(DATADIR)/icons/hicolor/symbolic/apps/$(APPID)-lossless-symbolic.svg
+	rm -f $(DATADIR)/icons/hicolor/symbolic/apps/$(APPID)-lossy-symbolic.svg
 	@for sz in $(ICON_SIZES); do \
 		rm -f $(DATADIR)/icons/hicolor/$${sz}x$${sz}/apps/$(APPID).png; \
 		rm -f $(DATADIR)/icons/hicolor/$${sz}x$${sz}/apps/$(CLIMAT).png; \

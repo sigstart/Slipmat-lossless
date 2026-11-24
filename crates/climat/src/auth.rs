@@ -85,7 +85,8 @@ async fn exchange(command: Command) -> Result<()> {
         (_, Reply::Failed) => bail!("The authentication request failed."),
         (
             _,
-            Reply::Playing
+            Reply::Streaming { .. }
+            | Reply::Playing
             | Reply::Paused
             | Reply::Position { .. }
             | Reply::Stopped

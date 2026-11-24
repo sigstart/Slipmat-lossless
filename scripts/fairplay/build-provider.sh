@@ -11,7 +11,7 @@ hybris="$repo/vendor/libhybris"
 
 sh "$repo/scripts/fairplay/prepare.sh" --check
 (cd "$hybris" && sha256sum --check --quiet --strict SHA256SUMS)
-for tool in cargo make bwrap xxd; do
+for tool in cargo make bwrap xxd g++; do
     command -v "$tool" >/dev/null || { echo "Missing build or runtime tool: $tool" >&2; exit 1; }
 done
 
@@ -39,6 +39,9 @@ trap 'exit 1' HUP INT TERM
 cp -R "$adam/drm" "$work/"
 make -B -C "$work/drm" HYBRIS_CORE="$hybris/x86_64/libhybris-core.so" libdrm_client.so >&2
 cp "$work/drm/libdrm_client.so" "$repo/target/release/fairplay-provider" "$build/"
+wvhost="$repo/crates/fairplay-provider/wvhost"
+g++ -std=c++17 -O2 -Wall -Wextra -Werror -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
+    -Wl,-z,relro,-z,now -I"$wvhost" -o "$build/wvhost" "$wvhost/wvhost.cpp" -ldl >&2
 printf '%s\n' "$socket" > "$build/pulse-socket"
 install -m 700 "$repo/scripts/fairplay/launch.sh" "$build/launch"
 printf '%s\n' "$build/launch"

@@ -168,7 +168,8 @@ impl From<Reply> for Screen {
             Reply::Rejected => Self::Rejected,
             Reply::Expired => Self::Expired,
             Reply::Failed => Self::Failed,
-            Reply::Playing
+            Reply::Streaming { .. }
+            | Reply::Playing
             | Reply::Paused
             | Reply::Position { .. }
             | Reply::Stopped

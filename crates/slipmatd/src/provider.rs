@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-FileCopyrightText: 2026 Jan Vermeulen
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! The provider process: spawning it on its profile directory, the stdio
@@ -313,7 +314,7 @@ impl Drop for Provider {
 /// catalogue ids.
 /// Apple's own code shares the stream and is free text that has not been read,
 /// so everything else is dropped rather than risk a credential in the log.
-const NATIVE_LOG: [&str; 8] = [
+const NATIVE_LOG: [&str; 9] = [
     "[recovery] ",
     "[.] LEASE_END ",
     "[.] PLAYBACK_ERROR",
@@ -322,6 +323,7 @@ const NATIVE_LOG: [&str; 8] = [
     "[hybris] key context ",
     "[guard] ",
     "[play] key ",
+    "[widevine] ",
 ];
 
 /// Longer than any line the wrapper writes; a longer one is not one of them.

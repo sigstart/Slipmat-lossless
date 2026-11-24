@@ -213,8 +213,8 @@ impl AppModel {
                 self.toast(&detail);
                 self.notify_playback_failed(&detail);
             }
-            // The answer to `climat check`, for the terminal that asked.
-            Event::Checked { .. } => {}
+            // The answers to `climat check` and `info`, for the terminal that asked.
+            Event::Checked { .. } | Event::Inspected { .. } => {}
         }
     }
 

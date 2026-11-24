@@ -247,6 +247,71 @@ For `playTrack { track_id }`:
    ignores the range and answers 200 is read past what was already fed; any
    other status fails the track as `stream`, with the status in the fault.
 
+### Songs with no lossless master: Widevine AAC
+
+Some songs have no lossless master. The catalogue then has no `enhancedHls`,
+only `.m4p` files under the old iTunes DRM (`drms`, scheme `itun`), which
+nothing here can open. Apple's web player gets these songs from `webPlayback`
+on `play.music.apple.com`, which offers each song in several flavors:
+
+| Flavor | What it is | Used |
+| --- | --- | --- |
+| `28:ctrp256` | 256 kbps AAC-LC, `cenc`, Widevine key (`data:;base64,<KID>`) | **yes** |
+| `30:cbcp256` | 256 kbps AAC-LC, `cbcs`, FairPlay key (`skd://…/afs_…`) | no: its licence server answers Apple's Android library with HTTP 500 |
+| `37:ibhp256` | the key over plain HTTPS (`KEYFORMAT="identity"`) | no: the key would sit outside the DRM component (rule 1) |
+| `32:ctrp64`, `34:cbcp64`, `38:ibhp64` | 64 kbps HE-AAC | no: Symphonia decodes AAC-LC only |
+
+`webPlayback` answers `failureType 5002` unless the request carries a browser
+`User-Agent` (measured 2026-11-24).
+
+So a lossy-only song plays through **Google's Widevine CDM**, hosted the way a
+browser hosts it:
+
+1. **Fetch.** `make widevine` runs `scripts/fetch-widevine.sh`, which downloads
+   the CDM component Chrome's updater uses from Google's release server and
+   checks it, and the `libwidevinecdm.so` inside it, against
+   [`widevine.lock`](../../vendor/widevine/x86_64/widevine.lock). It is opt-in:
+   `make install` never fetches it. Without it, a lossy-only song fails with
+   `PlaybackFault::WidevineMissing`, which a client can turn into an offer to
+   install it.
+2. **Host.** `wvhost` (`crates/fairplay-provider/wvhost/`, built by
+   `build-provider.sh`) is a Chromium CDM host for interface 10. The provider
+   starts one per track **inside its own sandbox**, where `launch.sh` binds the
+   CDM read-only at `/app/widevine` and gives it `/state/widevine` for its
+   state. The two speak lines over pipes; see the header of `wvhost.cpp`.
+3. **Licence.** The CDM's challenge goes to
+   `MZPlay.woa/wa/acquireWebPlaybackLicense` as JSON (`challenge`,
+   `key-system: com.widevine.alpha`, `uri` set to the playlist's key URI,
+   `adamId`), under the same tokens as `webPlayback`. The provider posts it, so
+   the tokens never reach the host. The answer's `license` goes back to the
+   CDM, which reports the key usable; a refused licence is `licenceDenied`.
+4. **Decrypt.** The init is cleared as for FairPlay (`schm` is `cenc`). Each
+   fragment's samples go to the CDM one by one, with their IV (8 bytes,
+   padded to 16) and subsample map from `senc`, and come back clear, in
+   memory, as FairPlay's do. The CDM never hands out a key; only key ids and
+   statuses cross the pipe.
+5. **Decode.** `slipmat_playback::Decoder` reads `mp4a` as well as `alac`:
+   AAC-LC decodes to floating point and is written as 24-bit PCM.
+
+**A Widevine licence takes the account's active session from this one.** After
+it, Apple refuses every *new* FairPlay key ("Invalid CKC"), while keys the
+library has cached still open, which is what made it look intermittent:
+measured 2026-11-24, both orders, every time. The provider therefore renews
+the FairPlay lease (`hybris_refresh_keys`, as the 10-minute refresh does)
+before the first FairPlay track after a Widevine one.
+
+**A key open that never returns ends the provider.** After that refusal, the
+retry blocked for good inside Apple's library, every FairPlay thread on a
+futex: a lock the SVError's `siglongjmp` left held. Nothing can cancel native
+code, so after 60 s the provider exits and the daemon restarts it and restores
+the session (rule 6).
+
+**Licence terms.** Google's `LICENSE` beside the CDM forbids using it "without a
+separate license agreement with Google"; Chrome and Firefox have one, and this
+does not, any more than Kodi or the AUR's `chromium-widevine` do. That is why
+it is fetched only on request and never packaged. See
+[Open questions](#open-questions).
+
 The `vendor/adam` loop rewrites `tfdt`, `mfhd` and `TrackID` for VLC and
 ffmpeg. It is not ported: the step 5 fixture decodes to the clear original's
 exact PCM without it, and Apple tracks play through the key change with it
@@ -438,6 +503,9 @@ that.
   network failure ends the track as `stream`. Deferred with network loss above.
 - **How long is a lease?** Unknown; it only matters if a lease refresh is ever
   seen to break playback.
+- **Google's terms for the Widevine CDM.** Its licence forbids use without an
+  agreement with Google. Fetching it only on request keeps it off every
+  package; whether that is enough is unresolved.
 - **Provenance** of the pinned libraries was verified on 2026-11-22 against
   official Apple and Google builds; libhybris and redistribution permission
   remain open ([details](../../vendor/fairplay/README.md#provenance)).

@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-FileCopyrightText: 2026 Jan Vermeulen
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Playback and Apple Music services over the daemon socket.
@@ -536,15 +537,24 @@ fn answer(
         }
         // Answered by a broadcast when it ends: a check takes as long as the
         // download, and the queue worker is what owns the slot it needs.
-        Request::Check { id } if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) => {
+        Request::Check { id } if is_catalogue_id(&id) => {
             daemon.send(Command::Check { id });
             None
         }
         Request::Check { id } => Some(Event::Checked {
             id,
             played: false,
-            outcome: "That is not an Apple Music catalogue id.".into(),
+            outcome: NOT_A_CATALOGUE_ID.into(),
             detail: None,
+        }),
+        Request::Inspect { id } if is_catalogue_id(&id) => {
+            inspect(daemon, id);
+            None
+        }
+        Request::Inspect { id } => Some(Event::Inspected {
+            id,
+            assets: None,
+            error: Some(NOT_A_CATALOGUE_ID.into()),
         }),
         Request::Browse {
             view,
@@ -956,6 +966,31 @@ fn search(daemon: &Rc<Daemon>, query: String, filter: CatalogFilter, offset: usi
 /// waiting on one must not stop the daemon answering anybody else. The answer
 /// arrives as an [`Event::Page`] on every subscriber, which is also what lets a
 /// second client show a page the first one opened.
+const NOT_A_CATALOGUE_ID: &str = "That is not an Apple Music catalogue id.";
+
+fn is_catalogue_id(id: &str) -> bool {
+    !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn inspect(daemon: &Rc<Daemon>, id: String) {
+    let Some(client) = daemon.client() else {
+        daemon.publish(Event::Inspected {
+            id,
+            assets: None,
+            error: Some("Not signed in yet".into()),
+        });
+        return;
+    };
+    let daemon = daemon.clone();
+    tokio::task::spawn_local(async move {
+        let (assets, error) = match client.track_assets(&id).await {
+            Ok(assets) => (Some(assets), None),
+            Err(err) => (None, Some(format!("{err:#}"))),
+        };
+        daemon.publish(Event::Inspected { id, assets, error });
+    });
+}
+
 fn open_page(daemon: &Rc<Daemon>, kind: PageKind, id: String) {
     let Some(client) = daemon.client() else {
         daemon.publish(Event::Error {

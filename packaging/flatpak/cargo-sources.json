@@ -2875,6 +2875,19 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/symphonia-codec-aac/symphonia-codec-aac-0.6.1.crate",
+        "sha256": "f5bf8e39552d34a3c4c98333370e62f48c92456d2e814f273b5c3ad7c4a5f45c",
+        "dest": "cargo/vendor/symphonia-codec-aac-0.6.1"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"f5bf8e39552d34a3c4c98333370e62f48c92456d2e814f273b5c3ad7c4a5f45c\", \"files\": {}}",
+        "dest": "cargo/vendor/symphonia-codec-aac-0.6.1",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/symphonia-codec-alac/symphonia-codec-alac-0.6.1.crate",
         "sha256": "920a78f96f3cf62932d0c497959c0cc2100ef36b03c7ca1417b260f432a482d8",
         "dest": "cargo/vendor/symphonia-codec-alac-0.6.1"

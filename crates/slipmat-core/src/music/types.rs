@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-FileCopyrightText: 2026 Jan Vermeulen
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Our types. Apple's JSON stops here (CLAUDE.md rule 9) — "parse, don't
@@ -204,6 +205,37 @@ pub struct Artist {
     /// for the catalog twin inline and copies its portrait across. See
     /// [`LibraryArtistResource`].
     pub library: bool,
+}
+
+/// What Apple's catalogue says it can stream of a song: the answer to "why
+/// will this not play". Names only — the asset URLs never leave the client.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackAssets {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub duration_ms: u64,
+    /// Apple's `audioTraits`: `lossless`, `lossy-stereo`, `atmos`, …
+    pub audio_traits: Vec<String>,
+    pub digital_master: bool,
+    /// `extendedAssetUrls`, sorted by kind. Playback needs `enhancedHls`.
+    pub assets: Vec<Asset>,
+    /// The streams `webPlayback` offers, one per flavor, after a first entry
+    /// describing the answer itself.
+    #[serde(default)]
+    pub web_playback: Vec<Asset>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Asset {
+    pub kind: String,
+    /// [`asset_shape::summarise`] of its playlist, or why it could not be read.
+    ///
+    /// [`asset_shape::summarise`]: super::asset_shape::summarise
+    pub playlist: Vec<String>,
+    /// The same of its best variant, when the playlist is a master.
+    pub variant: Vec<String>,
 }
 
 // --- Apple's wire shapes. Private: they never escape this module. ------------
@@ -953,5 +985,47 @@ mod tests {
         assert_eq!(playlist.curator, "Apple Music");
         assert_eq!(playlist.description, "The songs everyone is playing.");
         assert!(playlist.artwork.is_some());
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AssetAttributes {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub artist_name: String,
+    #[serde(default)]
+    pub album_name: String,
+    #[serde(default)]
+    pub duration_in_millis: u64,
+    #[serde(default)]
+    pub audio_traits: Vec<String>,
+    #[serde(default)]
+    pub is_apple_digital_master: bool,
+    #[serde(default)]
+    pub extended_asset_urls: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+impl From<AssetAttributes> for TrackAssets {
+    fn from(raw: AssetAttributes) -> Self {
+        Self {
+            title: raw.name,
+            artist: raw.artist_name,
+            album: raw.album_name,
+            duration_ms: raw.duration_in_millis,
+            audio_traits: raw.audio_traits,
+            digital_master: raw.is_apple_digital_master,
+            assets: raw
+                .extended_asset_urls
+                .into_keys()
+                .map(|kind| Asset {
+                    kind,
+                    playlist: Vec::new(),
+                    variant: Vec::new(),
+                })
+                .collect(),
+            web_playback: Vec::new(),
+        }
     }
 }

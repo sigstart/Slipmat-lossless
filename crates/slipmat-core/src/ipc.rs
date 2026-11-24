@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-FileCopyrightText: 2026 Jan Vermeulen
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! The daemon contract, in one file (rule 9's discipline, a second time).
@@ -19,7 +20,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::sort::SortBy;
 
+use crate::auth::StreamCodec;
 use crate::entry::Entry;
+use crate::music::types::TrackAssets;
 use crate::player::protocol::{Item, RepeatMode};
 use crate::queue::Start;
 
@@ -182,6 +185,11 @@ pub enum Request {
     /// from its beginning afterwards, because the provider cannot seek.
     #[serde(rename = "check")]
     Check { id: String },
+
+    /// What the catalogue offers to stream of a track, as the provider sees
+    /// it before playing. Answered by [`Event::Inspected`]; plays nothing.
+    #[serde(rename = "inspect")]
+    Inspect { id: String },
 
     /// A page of the library. `query` filters, `offset`/`limit` window it —
     /// a client draws a screenful, not 535 rows.
@@ -527,6 +535,14 @@ pub enum Event {
         outcome: String,
         detail: Option<String>,
     },
+
+    /// The answer to a [`Request::Inspect`]: the assets, or why there are none.
+    #[serde(rename = "inspected")]
+    Inspected {
+        id: String,
+        assets: Option<TrackAssets>,
+        error: Option<String>,
+    },
 }
 
 /// One row of the queue.
@@ -581,6 +597,9 @@ pub struct Snapshot {
     pub repeat: RepeatMode,
     pub can_next: bool,
     pub can_previous: bool,
+    /// What the track is streaming as; `None` until the provider has chosen.
+    #[serde(default)]
+    pub codec: Option<StreamCodec>,
 }
 
 /// How far along the daemon is. A client draws something different for each.

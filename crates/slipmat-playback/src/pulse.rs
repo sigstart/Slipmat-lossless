@@ -13,12 +13,9 @@ use libpulse_binding::{
     sample::{Format, Spec},
     stream::{FlagSet, SeekMode, State, Stream},
 };
-use symphonia::core::{
-    audio::{Channels, Position},
-    codecs::audio::AudioDecoder,
-};
+use symphonia::core::audio::{Channels, Position};
 
-use crate::{AlacDecoder, PcmFormat};
+use crate::{Decoder, PcmFormat};
 
 mod controlled;
 pub use controlled::{PlaybackEvent, Transport, play_controlled};
@@ -40,11 +37,11 @@ impl PulseOutput {
     /// Opens a stream for the decoder's sample rate, bit depth, and speaker order.
     /// Supply the absolute path to the server's Unix socket, such as
     /// `$XDG_RUNTIME_DIR/pulse/native`.
-    pub fn open(decoder: &AlacDecoder, socket: &Path) -> Result<Self> {
+    pub fn open(decoder: &Decoder, socket: &Path) -> Result<Self> {
         Self::open_with_flags(decoder, socket, FlagSet::empty())
     }
 
-    fn open_with_flags(decoder: &AlacDecoder, socket: &Path, flags: FlagSet) -> Result<Self> {
+    fn open_with_flags(decoder: &Decoder, socket: &Path, flags: FlagSet) -> Result<Self> {
         let server = unix_server(socket)?;
         let format = decoder.format();
         let encoding = Encoding::for_depth(format.bits_per_sample)?;
@@ -55,11 +52,9 @@ impl PulseOutput {
         };
         ensure!(spec.is_valid(), "invalid PulseAudio sample specification");
         let channels = decoder
-            .decoder
-            .codec_params()
-            .channels
-            .clone()
-            .context("missing ALAC channel layout")?;
+            .channels()
+            .cloned()
+            .context("missing channel layout")?;
         let map = channel_map(&channels, &spec)?;
 
         let mut mainloop = Mainloop::new().context("creating PulseAudio mainloop")?;
@@ -76,7 +71,7 @@ impl PulseOutput {
             }
         }
 
-        let mut stream = Stream::new(&mut context, "Slipmat Clear ALAC", &spec, Some(&map))
+        let mut stream = Stream::new(&mut context, "Slipmat", &spec, Some(&map))
             .with_context(|| format!("creating PulseAudio stream: {}", context.errno()))?;
         let target = spec.rate.div_ceil(4) * spec.frame_size() as u32;
         let buffer = BufferAttr {
@@ -111,9 +106,8 @@ impl PulseOutput {
     }
 
     /// Returns whether this stream can continue with the given decoder.
-    pub fn is_compatible(&self, decoder: &AlacDecoder) -> bool {
-        self.format == decoder.format()
-            && decoder.decoder.codec_params().channels.as_ref() == Some(&self.channels)
+    pub fn is_compatible(&self, decoder: &Decoder) -> bool {
+        self.format == decoder.format() && decoder.channels() == Some(&self.channels)
     }
 
     /// Writes whole interleaved frames of sign-extended, right-aligned PCM
@@ -244,7 +238,7 @@ fn unix_server(socket: &Path) -> Result<String> {
 
 fn channel_map(channels: &Channels, spec: &Spec) -> Result<Map> {
     let Channels::Positioned(positions) = channels else {
-        bail!("unsupported ALAC channel layout");
+        bail!("unsupported channel layout");
     };
     let mut map = Map::default();
     map.set_len(spec.channels);
@@ -263,7 +257,7 @@ fn channel_map(channels: &Channels, spec: &Spec) -> Result<Map> {
             Position::FRONT_RIGHT_CENTER => Speaker::FrontRightOfCenter,
             Position::SIDE_LEFT => Speaker::SideLeft,
             Position::SIDE_RIGHT => Speaker::SideRight,
-            _ => bail!("unsupported ALAC speaker position {position:?}"),
+            _ => bail!("unsupported speaker position {position:?}"),
         };
     }
     ensure!(

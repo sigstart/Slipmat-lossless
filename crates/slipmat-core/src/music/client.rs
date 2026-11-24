@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-FileCopyrightText: 2026 Jan Vermeulen
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Thin async wrapper over `api.music.apple.com`.
@@ -12,10 +13,11 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
+use super::asset_shape;
 use super::types::{
-    Album, AlbumAttributes, AlbumResource, Artist, ArtistAttributes, ArtistResource,
-    LibraryArtistResource, Playlist, PlaylistAttributes, RelationshipData, Resource, Response,
-    SongAttributes, SongContainers, Track,
+    Album, AlbumAttributes, AlbumResource, Artist, ArtistAttributes, ArtistResource, Asset,
+    AssetAttributes, LibraryArtistResource, Playlist, PlaylistAttributes, RelationshipData,
+    Resource, Response, SongAttributes, SongContainers, Track, TrackAssets,
 };
 
 /// What a catalog search turned up. Apple returns each kind in its own array;
@@ -30,6 +32,45 @@ pub struct SearchResults {
 }
 
 const API_BASE: &str = "https://api.music.apple.com/v1";
+/// Where the provider asks for a song's assets. Asked the same way here, so a
+/// diagnosis sees what playback saw.
+const ASSET_BASE: &str = "https://amp-api.music.apple.com/v1/catalog";
+/// Where Apple's player asks for a song's streams by flavor.
+const WEB_PLAYBACK: &str = "https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/webPlayback";
+/// How much of an asset `climat info` reads: all of a playlist, and the boxes
+/// at the front of a file.
+const ASSET_HEAD: usize = 1 << 20;
+
+struct AssetHead {
+    bytes: Vec<u8>,
+    total: Option<u64>,
+    content_type: Option<String>,
+}
+
+impl AssetHead {
+    fn playlist(&self) -> Option<&str> {
+        std::str::from_utf8(&self.bytes)
+            .ok()
+            .filter(|text| text.starts_with("#EXTM3U"))
+    }
+
+    /// The file's extension, type and size: nothing that addresses it.
+    fn describe(&self, url: &str) -> String {
+        let extension = reqwest::Url::parse(url)
+            .ok()
+            .and_then(|url| {
+                let name = url.path_segments()?.next_back()?.to_owned();
+                Some(name.rsplit_once('.')?.1.to_owned())
+            })
+            .unwrap_or_else(|| "none".into());
+        format!(
+            "a file: extension {extension}, type {}, {} bytes",
+            self.content_type.as_deref().unwrap_or("unknown"),
+            self.total
+                .map_or("unknown".into(), |total| total.to_string()),
+        )
+    }
+}
 /// A playlist long enough to hit this is a playlist nobody scrolls. Bounded so
 /// one enormous one cannot spin through fifty requests.
 const PLAYLIST_MAX: usize = 1_000;
@@ -714,6 +755,179 @@ impl Client {
             data.and_then(|d| d.data.into_iter().next()).map(|r| r.id)
         };
         Ok((first(albums), first(artists)))
+    }
+
+    /// What the catalogue offers to stream of a song, asked exactly as the
+    /// provider asks before playing it.
+    pub async fn track_assets(&self, id: &str) -> Result<TrackAssets> {
+        let res = self
+            .http
+            .get(format!(
+                "{ASSET_BASE}/{}/songs/{id}?extend=extendedAssetUrls",
+                self.storefront
+            ))
+            .bearer_auth(&self.developer_token)
+            .header("Origin", "https://music.apple.com")
+            .send()
+            .await
+            .map_err(Self::transport_error)
+            .context("requesting song assets")?;
+        if !res.status().is_success() {
+            return Err(self.explain(res));
+        }
+        let parsed: Response<Resource<AssetAttributes>> =
+            res.json().await.context("decoding song assets")?;
+        let song = parsed.data.into_iter().next().context("song not found")?;
+        let attributes = song.attributes.unwrap_or_default();
+        let urls = attributes.extended_asset_urls.clone();
+        let mut assets = TrackAssets::from(attributes);
+        for asset in &mut assets.assets {
+            let Some(url) = urls.get(&asset.kind).and_then(|url| url.as_str()) else {
+                continue;
+            };
+            (asset.playlist, asset.variant) = self.asset_shapes(url).await;
+        }
+        assets.web_playback = self.web_playback(id).await;
+        Ok(assets)
+    }
+
+    /// The streams Apple's player is offered for a song, by flavor: lossy
+    /// tracks have no `enhancedHls`, and this is where their streams are.
+    /// A `webPlayback` POST for a song, as Apple's web player sends it.
+    async fn web_playback_request(&self, id: &str) -> Result<reqwest::Response> {
+        let mut body = serde_json::json!({ "salableAdamId": id });
+        if self.storefront != "us" {
+            body["country"] = self.storefront.to_uppercase().into();
+        }
+        Ok(self
+            .web_player(self.http.post(WEB_PLAYBACK))?
+            .json(&body)
+            .send()
+            .await
+            .map_err(Self::transport_error)?)
+    }
+
+    /// The headers Apple's web endpoints answer: without the user agent,
+    /// `webPlayback` answers `5002` (measured 2026-11-24).
+    fn web_player(&self, request: reqwest::RequestBuilder) -> Result<reqwest::RequestBuilder> {
+        let user_token = self.music_user_token.as_deref().context("not signed in")?;
+        Ok(request
+            .bearer_auth(&self.developer_token)
+            .header("x-apple-music-user-token", user_token)
+            .header("Origin", "https://music.apple.com")
+            .header(
+                "User-Agent",
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+            ))
+    }
+
+    async fn web_playback(&self, id: &str) -> Vec<Asset> {
+        let answer = |lines: Vec<String>| Asset {
+            kind: "response".into(),
+            playlist: lines,
+            variant: Vec::new(),
+        };
+        let res = match self.web_playback_request(id).await {
+            Ok(res) => res,
+            Err(err) => return vec![answer(vec![format!("unsent: {err:#}")])],
+        };
+        let status = res.status();
+        let body: serde_json::Value = match res.json().await {
+            Ok(body) => body,
+            Err(_) => return vec![answer(vec![format!("status {status}, not JSON")])],
+        };
+        let keys = |value: &serde_json::Value| {
+            value
+                .as_object()
+                .map(|object| object.keys().cloned().collect::<Vec<_>>().join(", "))
+                .unwrap_or_default()
+        };
+        let song = &body["songList"][0];
+        let mut lines = vec![format!("status {status}"), format!("keys: {}", keys(&body))];
+        for field in ["failureType", "customerMessage"] {
+            if let Some(value) = body.get(field) {
+                lines.push(format!("{field}: {value}"));
+            }
+        }
+        lines.push(format!("song keys: {}", keys(song)));
+        for field in ["hls-key-server-url", "hls-key-cert-url", "is-itunes-stream"] {
+            if let Some(value) = song.get(field) {
+                lines.push(format!("{field}: {value}"));
+            }
+        }
+        let mut found = vec![answer(lines)];
+        for flavor in song["assets"].as_array().into_iter().flatten() {
+            let kind = flavor["flavor"].as_str().unwrap_or("unnamed").to_owned();
+            let (playlist, variant) = match flavor["URL"].as_str() {
+                Some(url) => self.asset_shapes(url).await,
+                None => (vec![format!("no URL; keys: {}", keys(flavor))], Vec::new()),
+            };
+            found.push(Asset {
+                kind,
+                playlist,
+                variant,
+            });
+        }
+        found
+    }
+
+    /// An asset's shape and, for a master playlist, its best variant's.
+    async fn asset_shapes(&self, url: &str) -> (Vec<String>, Vec<String>) {
+        let unreadable = |err: anyhow::Error| vec![format!("unreadable: {err:#}")];
+        let head = match self.asset_head(url).await {
+            Ok(head) => head,
+            Err(err) => return (unreadable(err), Vec::new()),
+        };
+        let Some(master) = head.playlist() else {
+            let mut lines = vec![head.describe(url)];
+            lines.extend(asset_shape::mp4_boxes(&head.bytes));
+            return (lines, Vec::new());
+        };
+        let variant = match asset_shape::best_variant(master) {
+            Some(uri) => match reqwest::Url::parse(url).and_then(|base| base.join(uri)) {
+                Ok(variant) => match self.asset_head(variant.as_str()).await {
+                    Ok(head) => head
+                        .playlist()
+                        .map(asset_shape::summarise)
+                        .unwrap_or_default(),
+                    Err(err) => unreadable(err),
+                },
+                Err(_) => vec!["an unreadable variant address".into()],
+            },
+            None => Vec::new(),
+        };
+        (asset_shape::summarise(master), variant)
+    }
+
+    /// The start of a CDN asset. Asset addresses need no credentials, so none
+    /// are sent; a playlist fits whole, and a file's boxes start there.
+    async fn asset_head(&self, url: &str) -> Result<AssetHead> {
+        let res = self
+            .http
+            .get(url)
+            .header(
+                reqwest::header::RANGE,
+                format!("bytes=0-{}", ASSET_HEAD - 1),
+            )
+            .send()
+            .await
+            .map_err(Self::transport_error)?;
+        anyhow::ensure!(res.status().is_success(), "{}", res.status());
+        let header = |name| {
+            res.headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+        };
+        let total = header(reqwest::header::CONTENT_RANGE)
+            .and_then(|range| range.rsplit('/').next()?.parse().ok())
+            .or_else(|| header(reqwest::header::CONTENT_LENGTH)?.parse().ok());
+        let content_type = header(reqwest::header::CONTENT_TYPE).map(str::to_owned);
+        let bytes = res.bytes().await?.to_vec();
+        Ok(AssetHead {
+            bytes,
+            total,
+            content_type,
+        })
     }
 
     /// An album and its tracks, in one request.

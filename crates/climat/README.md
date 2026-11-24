@@ -66,6 +66,16 @@ checks the current track. It stops playback first, and the stopped track starts
 again from its beginning. When a track fails, the second line is what the player
 saw of the file; the command exits non-zero, so it can be scripted.
 
+`climat info [id]` prints what Apple's catalogue offers to stream of a track:
+its audio traits (`lossless`, `lossy-stereo`, `atmos`, …), whether it is an
+Apple Digital Master, and which asset kinds it has. Slipmat plays the
+`enhancedHls` asset, so a track without one cannot play. It plays nothing and
+leaves playback alone. For a song with no lossless master it also lists the
+streams Apple's web player is offered, by flavor.
+
+`check` names what it decoded: `lossless` with its depth and rate, or `AAC (not
+lossless)` for a song that plays through the opt-in Widevine CDM.
+
 ## The bars
 
 CLImat displays the visualiser by reading a monitor source, the loopback every output

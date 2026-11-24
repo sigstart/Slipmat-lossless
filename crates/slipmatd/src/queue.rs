@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-FileCopyrightText: 2026 Jan Vermeulen
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Owns the queue and serializes selections with the audio worker.
@@ -6,7 +7,7 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use slipmat_core::auth::{DecodeStep, PlaybackFault, PlaybackStage, Reply};
+use slipmat_core::auth::{DecodeStep, PlaybackFault, PlaybackStage, Reply, StreamCodec};
 use slipmat_core::ipc::Event;
 use slipmat_core::player::protocol::{
     Command, Event as PlayerEvent, Item, PlaybackState, Queue, QueueChange,
@@ -28,6 +29,8 @@ struct Checking {
     /// Dropping it stops the check.
     _control: Sender<PlaybackControl>,
     events: Receiver<Reply>,
+    /// What the provider chose to stream, once it says.
+    codec: Option<StreamCodec>,
 }
 
 #[derive(Default)]
@@ -174,6 +177,7 @@ impl QueuePlayer {
                     id,
                     _control: control,
                     events,
+                    codec: None,
                 });
             }
             Err(Reply::SignedOut) => {
@@ -188,6 +192,10 @@ impl QueuePlayer {
     }
 
     fn checked(&mut self, daemon: &Daemon, service: Option<&Rc<Service>>, reply: Option<Reply>) {
+        if let (Some(Reply::Streaming { codec }), Some(checking)) = (reply, self.checking.as_mut())
+        {
+            checking.codec = Some(codec);
+        }
         if reply.is_some_and(Reply::is_playback_update) {
             return;
         }
@@ -201,9 +209,15 @@ impl QueuePlayer {
                 channels,
             }) => (
                 true,
-                format!(
-                    "Played through: {bits_per_sample}-bit, {sample_rate} Hz, {channels} channel(s)."
-                ),
+                match checking.codec {
+                    // Decoded to 24 bits, which says nothing about the stream.
+                    Some(StreamCodec::Aac) => format!(
+                        "Played through: AAC (not lossless), {sample_rate} Hz, {channels} channel(s)."
+                    ),
+                    _ => format!(
+                        "Played through: lossless, {bits_per_sample}-bit, {sample_rate} Hz, {channels} channel(s)."
+                    ),
+                },
             ),
             Some(Reply::PlaybackFailed { stage, fault }) => (false, failure_text(stage, fault)),
             Some(Reply::LicenceDenied) => {
@@ -281,6 +295,7 @@ impl QueuePlayer {
 
     fn select(&mut self, daemon: &Rc<Daemon>, index: usize, play: bool) {
         self.index = index.min(self.items.len().saturating_sub(1));
+        daemon.model.borrow_mut().stream_codec = None;
         self.playing = play && !self.items.is_empty();
         if !self.playing {
             daemon.require_sign_in(false);
@@ -379,6 +394,7 @@ impl QueuePlayer {
                     events,
                     stopping: false,
                 });
+                daemon.model.borrow_mut().stream_codec = None;
                 Self::state(daemon, PlaybackState::Loading);
             }
             Err(_) => self.fail(daemon, "The playback worker is busy or unavailable."),
@@ -402,7 +418,13 @@ impl QueuePlayer {
                 Self::position(daemon, position_ms, duration);
                 daemon.publish_snapshot();
             }
-            Some(Reply::Playing | Reply::Paused | Reply::Position { .. }) => {}
+            Some(Reply::Streaming { codec }) if !stopping => {
+                daemon.model.borrow_mut().stream_codec = Some(codec);
+                daemon.publish_snapshot();
+            }
+            Some(
+                Reply::Streaming { .. } | Reply::Playing | Reply::Paused | Reply::Position { .. },
+            ) => {}
             terminal => {
                 self.active = None;
                 if stopping {
@@ -527,6 +549,10 @@ fn failure_text(stage: PlaybackStage, fault: Option<PlaybackFault>) -> String {
             )
         }
         PlaybackFault::AudioServer => "The audio server stopped the stream.".into(),
+        PlaybackFault::WidevineMissing => {
+            "This song has no lossless version. Playing its AAC needs the Widevine module: run `make widevine`.".into()
+        }
+        PlaybackFault::Widevine => "The Widevine module stopped responding.".into(),
     }
 }
 

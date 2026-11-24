@@ -8,4 +8,4 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 libpulse-binding = { version = "2", default-features = false }
-symphonia = { version = "=0.6.1", default-features = false, features = ["alac", "isomp4"] }
+symphonia = { version = "=0.6.1", default-features = false, features = ["aac", "alac", "isomp4"] }

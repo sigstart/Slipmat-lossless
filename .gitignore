@@ -1,5 +1,7 @@
 /target
 /vendor/fairplay/x86_64/rootfs/
+/vendor/widevine/x86_64/cdm/
+/vendor/widevine/x86_64/.widevine-fetch.*
 
 # ── DRM client (FairPlay provider) build artifacts ───────────────────────────────
 # Built from drm/ via make; not source.

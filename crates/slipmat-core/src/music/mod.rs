@@ -10,5 +10,6 @@
 // `Client::delete` waits for a removal route (CLAUDE.md, writing to the library).
 #![allow(dead_code)]
 
+pub mod asset_shape;
 pub mod client;
 pub mod types;

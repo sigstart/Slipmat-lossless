@@ -3,6 +3,7 @@
 
 //! The daemon's mirror, and how it becomes something a client can draw.
 
+use slipmat_core::auth::StreamCodec;
 use slipmat_core::ipc::{QueueItem, Snapshot, Stage};
 use slipmat_core::player::PlayerState;
 use slipmat_core::player::protocol::Tokens;
@@ -23,6 +24,8 @@ pub struct Model {
     pub dead_ids: std::collections::HashSet<String>,
     /// The current track's cover on disk, once fetched.
     pub art_path: Option<std::path::PathBuf>,
+    /// What the current track is streaming as, once the provider has chosen.
+    pub stream_codec: Option<StreamCodec>,
 }
 
 impl Model {
@@ -35,6 +38,7 @@ impl Model {
             library: Library::default(),
             dead_ids: slipmat_core::unplayable::load(),
             art_path: None,
+            stream_codec: None,
         }
     }
 
@@ -89,6 +93,7 @@ impl Model {
             volume: self.volume,
             shuffle: self.player.shuffle,
             repeat: self.player.repeat,
+            codec: self.stream_codec,
             can_next: self.player.has_next(),
             can_previous: self.player.has_previous(),
         }

@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-FileCopyrightText: 2026 Jan Vermeulen
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Pull-based PCM decoding and local audio output for clear ALAC in an MP4 container.
+//! Pull-based PCM decoding and local audio output for clear ALAC or AAC-LC in
+//! an MP4 container.
 
 mod fragmented;
 mod pulse;
@@ -20,17 +22,23 @@ use anyhow::{Context, Result, ensure};
 use symphonia::{
     core::{
         audio::{Audio, GenericAudioBufferRef},
-        codecs::audio::{AudioDecoder, well_known::CODEC_ID_ALAC},
+        codecs::audio::{
+            AudioDecoder,
+            well_known::{CODEC_ID_AAC, CODEC_ID_ALAC},
+        },
         formats::FormatReader,
         io::{MediaSourceStream, ReadOnlySource},
     },
-    default::{codecs::AlacDecoder as SymphoniaAlac, formats::IsoMp4Reader},
+    default::{
+        codecs::{AacDecoder as SymphoniaAac, AlacDecoder as SymphoniaAlac},
+        formats::IsoMp4Reader,
+    },
 };
 
 use fragmented::FragmentedM4a;
 pub use symphonia::core::io::MediaSource;
 
-/// Context on an error from the ALAC stream rather than from the audio server,
+/// Context on an error from the audio stream rather than from the audio server,
 /// so a caller can tell the two apart with `downcast_ref`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Undecodable {
@@ -47,7 +55,7 @@ pub struct Undecodable {
 pub enum DecodeStep {
     /// The MP4 around the audio could not be read.
     Container,
-    /// An ALAC frame did not decode.
+    /// An audio frame did not decode.
     Audio,
     /// The demuxer ran out of audio before the stream ended.
     EndedEarly,
@@ -57,14 +65,13 @@ impl std::fmt::Display for Undecodable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "the ALAC stream did not decode ({:?} after {} ms)",
+            "the audio stream did not decode ({:?} after {} ms)",
             self.step, self.decoded_ms
         )
     }
 }
 
-/// The source PCM format, before any output conversion.
-
+/// The PCM the decoder hands the output.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PcmFormat {
     pub sample_rate: u32,
@@ -72,10 +79,22 @@ pub struct PcmFormat {
     pub channels: usize,
 }
 
-/// Decodes the first ALAC audio track in a clear M4A/MP4 source.
-pub struct AlacDecoder {
+/// What the track was encoded as.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Codec {
+    Alac,
+    /// AAC-LC. Decoded to floating point, then to [`AAC_BITS`]-bit PCM.
+    Aac,
+}
+
+/// AAC decodes to floating point; 24 bits holds it with room to spare.
+pub const AAC_BITS: u8 = 24;
+
+/// Decodes the first ALAC or AAC-LC audio track in a clear M4A/MP4 source.
+pub struct Decoder {
     reader: IsoMp4Reader<'static>,
-    decoder: SymphoniaAlac,
+    decoder: Box<dyn AudioDecoder>,
+    codec: Codec,
     track_id: u32,
     format: PcmFormat,
     samples: Vec<i32>,
@@ -84,7 +103,7 @@ pub struct AlacDecoder {
     frames_decoded: u64,
 }
 
-impl AlacDecoder {
+impl Decoder {
     /// Opens a clear MP4 container from a Symphonia media source.
     pub fn open(source: Box<dyn MediaSource>) -> Result<Self> {
         let stream = MediaSourceStream::new(source, Default::default());
@@ -93,30 +112,38 @@ impl AlacDecoder {
             .tracks()
             .iter()
             .filter_map(|track| Some((track.id, track.codec_params.as_ref()?.audio()?)))
-            .find(|(_, params)| params.codec == CODEC_ID_ALAC)
-            .context("MP4 has no ALAC audio track")?;
+            .find(|(_, params)| matches!(params.codec, CODEC_ID_ALAC | CODEC_ID_AAC))
+            .context("MP4 has no ALAC or AAC audio track")?;
 
-        let cookie = params
-            .extra_data
-            .as_deref()
-            .context("missing ALAC configuration")?;
-        let bits_per_sample = alac_bit_depth(cookie)?;
-        let decoder = SymphoniaAlac::try_new(params, &Default::default())
-            .context("initializing ALAC decoder")?;
+        let (codec, decoder, bits_per_sample): (_, Box<dyn AudioDecoder>, _) =
+            if params.codec == CODEC_ID_ALAC {
+                let cookie = params
+                    .extra_data
+                    .as_deref()
+                    .context("missing ALAC configuration")?;
+                let decoder = SymphoniaAlac::try_new(params, &Default::default())
+                    .context("initializing ALAC decoder")?;
+                (Codec::Alac, Box::new(decoder), alac_bit_depth(cookie)?)
+            } else {
+                let decoder = SymphoniaAac::try_new(params, &Default::default())
+                    .context("initializing AAC decoder")?;
+                (Codec::Aac, Box::new(decoder), AAC_BITS)
+            };
         let decoded = decoder.codec_params();
         let sample_rate = decoded
             .sample_rate
             .filter(|rate| *rate > 0)
-            .context("missing ALAC sample rate")?;
+            .context("missing sample rate")?;
         let channels = decoded
             .channels
             .as_ref()
-            .context("missing ALAC channels")?
+            .context("missing channels")?
             .count();
 
         Ok(Self {
             reader,
             decoder,
+            codec,
             track_id,
             format: PcmFormat {
                 sample_rate,
@@ -157,6 +184,14 @@ impl AlacDecoder {
         self.format
     }
 
+    pub fn codec(&self) -> Codec {
+        self.codec
+    }
+
+    pub(crate) fn channels(&self) -> Option<&symphonia::core::audio::Channels> {
+        self.decoder.codec_params().channels.as_ref()
+    }
+
     /// Borrows one nonempty packet of frame-interleaved PCM in Symphonia channel order.
     /// Samples are sign-extended, right-aligned i32 values at the source bit depth.
     /// The decoder reuses its buffer and retains at most one packet of interleaved PCM.
@@ -191,29 +226,41 @@ impl AlacDecoder {
             }
 
             let audio_failed = self.undecodable(DecodeStep::Audio);
-            let GenericAudioBufferRef::S32(audio) = self
+            let decoded = self
                 .decoder
                 .decode(&packet)
-                .context("decoding ALAC packet")
-                .context(audio_failed)?
-            else {
-                return Err(
-                    anyhow::anyhow!("ALAC decoder returned an unexpected sample format")
-                        .context(audio_failed),
-                );
+                .context("decoding audio packet")
+                .context(audio_failed)?;
+            let frames = match (self.codec, decoded) {
+                (Codec::Alac, GenericAudioBufferRef::S32(audio)) => {
+                    audio.copy_to_vec_interleaved(&mut self.samples);
+                    // Symphonia left-aligns ALAC samples in i32. Undo that shift
+                    // without rescaling or converting through floating point.
+                    let shift = i32::BITS - u32::from(self.format.bits_per_sample);
+                    for sample in &mut self.samples {
+                        *sample >>= shift;
+                    }
+                    audio.frames()
+                }
+                (Codec::Aac, GenericAudioBufferRef::F32(audio)) => {
+                    let mut floats = Vec::new();
+                    audio.copy_to_vec_interleaved(&mut floats);
+                    self.samples.clear();
+                    self.samples
+                        .extend(floats.iter().map(|&sample| aac_sample(sample)));
+                    audio.frames()
+                }
+                _ => {
+                    return Err(anyhow::anyhow!(
+                        "the decoder returned an unexpected sample format"
+                    )
+                    .context(audio_failed));
+                }
             };
-            if audio.frames() == 0 {
+            if frames == 0 {
                 continue;
             }
-
-            self.frames_decoded += audio.frames() as u64;
-            audio.copy_to_vec_interleaved(&mut self.samples);
-            // Symphonia left-aligns ALAC samples in i32. Undo that shift without
-            // rescaling or converting through floating point.
-            let shift = i32::BITS - u32::from(self.format.bits_per_sample);
-            for sample in &mut self.samples {
-                *sample >>= shift;
-            }
+            self.frames_decoded += frames as u64;
             return Ok(true);
         }
         if let Some(eof) = &self.source_eof
@@ -226,6 +273,13 @@ impl AlacDecoder {
         }
         Ok(false)
     }
+}
+
+/// A float sample as right-aligned [`AAC_BITS`]-bit PCM. AAC can overshoot
+/// full scale between samples, so it is clipped rather than wrapped.
+fn aac_sample(sample: f32) -> i32 {
+    const FULL_SCALE: f32 = ((1 << (AAC_BITS - 1)) - 1) as f32;
+    (sample.clamp(-1.0, 1.0) * FULL_SCALE).round() as i32
 }
 
 fn alac_bit_depth(mut cookie: &[u8]) -> Result<u8> {

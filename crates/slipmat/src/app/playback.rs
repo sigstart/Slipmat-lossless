@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-FileCopyrightText: 2026 Jan Vermeulen
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Pushing the mirrored player state outwards — to the Now Playing bar, to
@@ -121,6 +122,7 @@ impl AppModel {
             repeat: self.mirror.repeat(),
             // Mirrored from the daemon, which owns the desktop stream volume.
             volume: self.volume,
+            codec: item.and_then(|i| i.codec),
             title: item.map(|i| i.title.clone()).unwrap_or_default(),
             artist: item.map(|i| i.artist.clone()).unwrap_or_default(),
             album: item.map(|i| i.album.clone()).unwrap_or_default(),

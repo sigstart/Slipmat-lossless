@@ -30,7 +30,7 @@ pub enum PlaybackEvent {
 /// Plays one clear track, reporting the PulseAudio clock and accepting
 /// transport commands through the final drain.
 pub fn play_controlled(
-    mut decoder: AlacDecoder,
+    mut decoder: Decoder,
     socket: &Path,
     start_paused: bool,
     commands: Receiver<Result<Transport>>,
@@ -39,7 +39,7 @@ pub fn play_controlled(
     // The decoder marks its own errors with where they happened.
     let mut block = decoder
         .next_block()?
-        .context("ALAC track is empty")
+        .context("the track is empty")
         .context(Undecodable {
             step: DecodeStep::EndedEarly,
             decoded_ms: 0,
@@ -57,7 +57,7 @@ pub fn play_controlled(
     // audio mainloop responsive with at most one waiting packet.
     let (send, packets) = mpsc::sync_channel(0);
     thread::Builder::new()
-        .name("alac-decoder".into())
+        .name("audio-decoder".into())
         .spawn(move || {
             loop {
                 match decoder.next_block() {
@@ -70,7 +70,7 @@ pub fn play_controlled(
                 }
             }
         })
-        .context("starting ALAC decoder thread")?;
+        .context("starting decoder thread")?;
 
     let mut transport = Playback {
         commands,

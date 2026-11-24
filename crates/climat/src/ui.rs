@@ -10,6 +10,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use slipmat_core::auth::StreamCodec;
 use slipmat_core::ipc::{Snapshot, Stage};
 
 use crate::browser::{self, Browser};
@@ -243,12 +244,17 @@ fn now_playing(view: &View, width: usize, rows: usize) -> Vec<Line<'static>> {
     // What moved off the seek line: the state at one end, the clock at the
     // other. There is room to say the state in a word now rather than trusting
     // a glyph alone to carry it.
+    let mut left = vec![
+        Span::styled(view.snap.glyph(), Style::from(ACCENT())),
+        Span::raw("  "),
+        Span::styled(view.snap.state_word(), Style::from(MUTED())),
+    ];
+    if let Some(quality) = quality(view.snap) {
+        left.push(Span::styled("  ·  ", Style::from(DIM())));
+        left.push(Span::styled(quality, Style::from(DIM())));
+    }
     let state = Line::from(ends(
-        vec![
-            Span::styled(view.snap.glyph(), Style::from(ACCENT())),
-            Span::raw("  "),
-            Span::styled(view.snap.state_word(), Style::from(MUTED())),
-        ],
+        left,
         vec![Span::styled(
             format!(
                 "{} / {}",
@@ -519,6 +525,14 @@ impl Transport for Snapshot {
             "Paused"
         }
     }
+}
+
+/// Whether what you hear is lossless, once the provider has chosen a stream.
+fn quality(snap: &Snapshot) -> Option<&'static str> {
+    Some(match snap.codec? {
+        StreamCodec::Alac => "Lossless",
+        StreamCodec::Aac => "AAC, not lossless",
+    })
 }
 
 fn mode(on: bool, text: &str) -> Span<'static> {

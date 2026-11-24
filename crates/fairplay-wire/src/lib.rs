@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-FileCopyrightText: 2026 Jan Vermeulen
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! The protocol between `slipmatd` and the sandboxed FairPlay provider.
@@ -111,6 +112,10 @@ pub enum Reply {
     SignedIn {
         catalogue: Catalogue,
     },
+    /// Which stream was chosen, once per track, before it plays.
+    Streaming {
+        codec: StreamCodec,
+    },
     Playing,
     Paused,
     Position {
@@ -132,6 +137,21 @@ pub enum Reply {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diagnosis: Option<Box<Diagnosis>>,
     },
+}
+
+/// What a track is streamed as. Lossless when Apple has a lossless master;
+/// otherwise the best AAC it offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StreamCodec {
+    Alac,
+    Aac,
+}
+
+impl StreamCodec {
+    pub fn is_lossless(self) -> bool {
+        self == Self::Alac
+    }
 }
 
 /// The catalogue credentials a signed-in provider hands the daemon.
@@ -207,6 +227,11 @@ pub enum PlaybackFault {
     },
     /// The audio server refused or dropped the output stream.
     AudioServer,
+    /// The song has no lossless master, and its AAC needs Google's Widevine
+    /// CDM, which is not installed. A client can offer to install it.
+    WidevineMissing,
+    /// The Widevine CDM would not start, or stopped answering.
+    Widevine,
 }
 
 /// What the provider saw of a file that would not decode: the fragment that
@@ -485,6 +510,9 @@ mod tests {
             Reply::Failed,
             Reply::SignedIn {
                 catalogue: catalogue(),
+            },
+            Reply::Streaming {
+                codec: StreamCodec::Aac,
             },
             Reply::Playing,
             Reply::Paused,

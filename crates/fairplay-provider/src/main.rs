@@ -22,6 +22,7 @@ mod mp4;
 mod play;
 mod profile;
 mod session;
+mod widevine;
 
 use std::fs::OpenOptions;
 use std::io;

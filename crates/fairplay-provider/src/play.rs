@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-FileCopyrightText: 2026 Jan Vermeulen
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! One track, from the catalogue lookup to the last sample at the audio server.
@@ -30,20 +31,21 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use fairplay_wire::{
     Catalogue, DecodeStep, DescriptionChange, Diagnosis, FragmentShape, KeyChange, MAX_CHANGES,
-    NamedKey, PlaybackFault, PlaybackStage, Reply,
+    NamedKey, PlaybackFault, PlaybackStage, Reply, StreamCodec,
 };
 use reqwest::StatusCode;
 use slipmat_playback::{
-    AlacDecoder, PcmFormat, PlaybackEvent, Transport, Undecodable, play_controlled,
+    Decoder, PcmFormat, PlaybackEvent, Transport, Undecodable, play_controlled,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{sleep, timeout};
 
-use crate::catalogue;
+use crate::catalogue::{self, Source};
 use crate::cbcs::{Boxes, Clearer, Piece};
 use crate::fairplay::{Fairplay, KeyRequest};
-use crate::hls::{self, Media, PREFETCH_KEY};
+use crate::hls::{self, KeySystem, Media, PREFETCH_KEY};
 use crate::mp4::{AlacConfig, Protection, Shape};
+use crate::widevine::{self, Widevine};
 
 const AUDIO_SOCKET: &str = "/audio/native";
 const STALL: Duration = Duration::from_secs(30);
@@ -51,8 +53,24 @@ const RETRIES: u32 = 3;
 /// Apple's key server refuses a track key now and then, and grants the same
 /// key minutes later on the same session. A real denial outlasts these.
 const KEY_RETRIES: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(4)];
+/// A key open takes under a second; this is a wedged library, not a slow one.
+const KEY_OPEN_LIMIT: Duration = Duration::from_secs(60);
+/// The provider's exit status when it ends itself over a wedged key open.
+const KEY_OPEN_HUNG: i32 = 70;
 /// Fragments buffered ahead of the decoder.
 const PIPE_FRAGMENTS: usize = 4;
+
+/// How a track's samples are decrypted, once its licence is granted.
+enum Keys {
+    /// Contexts open on the fairplay thread, by index into `Media::keys`.
+    FairPlay,
+    /// A CDM session holding the track's key, locked because decrypting
+    /// borrows it across awaits.
+    Widevine {
+        host: Box<tokio::sync::Mutex<Widevine>>,
+        key_id: [u8; 16],
+    },
+}
 
 /// Where the decoded audio goes.
 #[derive(Clone, Copy)]
@@ -78,6 +96,9 @@ pub enum Update {
 
 pub struct Player {
     fairplay: Arc<Fairplay>,
+    /// Set once a Widevine licence has taken the account's active session,
+    /// so the next FairPlay track renews the lease first.
+    lease_taken: std::sync::atomic::AtomicBool,
     catalogue: Catalogue,
     api: reqwest::Client,
     cdn: reqwest::Client,
@@ -87,6 +108,7 @@ impl Player {
     pub fn new(fairplay: Arc<Fairplay>, catalogue: Catalogue) -> Result<Self> {
         Ok(Self {
             fairplay,
+            lease_taken: std::sync::atomic::AtomicBool::new(false),
             catalogue,
             api: catalogue::client()?,
             cdn: reqwest::Client::builder()
@@ -156,22 +178,65 @@ impl Player {
             }
         };
         match media {
-            Ok(media) => self.stream(&media, output, paused, controls, updates).await,
+            Ok((codec, media, keys)) => {
+                let _ = updates.send(Update::Playback(Reply::Streaming { codec }));
+                self.stream(&media, &keys, output, paused, controls, updates)
+                    .await
+            }
             Err(reply) => reply,
         }
     }
 
     /// Everything before audio: the lookups, then the licence gate.
-    async fn prepare(&self, track_id: &str) -> Result<Media, Reply> {
+    async fn prepare(&self, track_id: &str) -> Result<(StreamCodec, Media, Keys), Reply> {
         if !is_track_id(track_id) {
             return Err(failed(PlaybackStage::Catalogue));
         }
-        let asset = catalogue::lossless_asset(&self.api, &self.catalogue, track_id)
-            .await
-            .map_err(failed)?;
-        let media = hls::load(&self.cdn, &asset)
-            .await
-            .map_err(|_| faulted(PlaybackStage::Stream, PlaybackFault::Playlist))?;
+        let playlist_fault = || faulted(PlaybackStage::Stream, PlaybackFault::Playlist);
+        match self.locate(track_id).await? {
+            Source::Master(master) => {
+                let (codec, media) = hls::load(&self.cdn, &master)
+                    .await
+                    .map_err(|_| playlist_fault())?;
+                if media.system != KeySystem::FairPlay {
+                    return Err(playlist_fault());
+                }
+                self.open_fairplay(track_id, &media).await?;
+                Ok((codec, media, Keys::FairPlay))
+            }
+            Source::Widevine {
+                playlist,
+                certificate,
+            } => {
+                if !widevine::installed() {
+                    return Err(faulted(
+                        PlaybackStage::Stream,
+                        PlaybackFault::WidevineMissing,
+                    ));
+                }
+                let media = hls::load_media(&self.cdn, &playlist)
+                    .await
+                    .map_err(|_| playlist_fault())?;
+                if media.system != KeySystem::Widevine {
+                    return Err(playlist_fault());
+                }
+                let keys = self
+                    .license_widevine(track_id, &media, &certificate)
+                    .await?;
+                Ok((StreamCodec::Aac, media, keys))
+            }
+        }
+    }
+
+    /// The licence gate for FairPlay: every key the playlist names opens.
+    async fn open_fairplay(&self, track_id: &str, media: &Media) -> Result<(), Reply> {
+        if self
+            .lease_taken
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            let renewed = self.fairplay.renew_lease().await;
+            eprintln!("[play] key lease renewed after a Widevine track: {renewed}");
+        }
         let keys = media
             .keys
             .iter()
@@ -181,27 +246,123 @@ impl Player {
             })
             .collect();
         match self.open_keys(keys).await {
-            Ok(Ok(())) => Ok(media),
+            Ok(Ok(())) => Ok(()),
             Ok(Err(refused)) if media.keys[refused] != PREFETCH_KEY => Err(Reply::LicenceDenied),
             Ok(Err(_)) => Err(faulted(PlaybackStage::Stream, PlaybackFault::PrefetchKey)),
             Err(_) => Err(faulted(PlaybackStage::Stream, PlaybackFault::Worker)),
         }
     }
 
+    /// The licence gate for Widevine: a CDM session whose key Apple licensed.
+    async fn license_widevine(
+        &self,
+        track_id: &str,
+        media: &Media,
+        certificate: &reqwest::Url,
+    ) -> Result<Keys, Reply> {
+        let playlist_fault = || faulted(PlaybackStage::Stream, PlaybackFault::Playlist);
+        let host_fault = |err: anyhow::Error| {
+            eprintln!("[widevine] {err:#}");
+            faulted(PlaybackStage::Stream, PlaybackFault::Widevine)
+        };
+        let key_uri = media.keys.first().ok_or_else(playlist_fault)?;
+        let key_id = widevine::key_id(key_uri).map_err(|_| playlist_fault())?;
+        let certificate = self
+            .small_file(certificate)
+            .await
+            .map_err(|_| playlist_fault())?;
+        let mut host = Widevine::start().await.map_err(host_fault)?;
+        // Why Apple refused, kept apart from the host's own failures.
+        let refused = std::sync::Mutex::new(None);
+        let licensed = host
+            .license(&certificate, &key_id, |challenge| {
+                let refused = &refused;
+                async move {
+                    catalogue::widevine_license(
+                        &self.api,
+                        &self.catalogue,
+                        track_id,
+                        key_uri,
+                        &challenge,
+                    )
+                    .await
+                    .map_err(|stage| {
+                        if let Ok(mut refused) = refused.lock() {
+                            *refused = Some(stage);
+                        }
+                        anyhow!("the licence request failed")
+                    })
+                }
+            })
+            .await;
+        let refused = refused.lock().ok().and_then(|refused| *refused);
+        match (licensed, refused) {
+            (Ok(()), _) => {
+                self.lease_taken
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(Keys::Widevine {
+                    host: Box::new(tokio::sync::Mutex::new(host)),
+                    key_id,
+                })
+            }
+            (Err(_), Some(PlaybackStage::CatalogueAuthorization)) => Err(Reply::LicenceDenied),
+            (Err(_), Some(stage)) => Err(failed(stage)),
+            (Err(err), None) => Err(host_fault(err)),
+        }
+    }
+
+    /// A certificate or similar: one small GET from the CDN.
+    async fn small_file(&self, url: &reqwest::Url) -> Result<Vec<u8>> {
+        let response = self.cdn.get(url.clone()).send().await?;
+        anyhow::ensure!(response.status() == StatusCode::OK, "refused");
+        let bytes = response.bytes().await?;
+        anyhow::ensure!(bytes.len() <= 1 << 16, "too large");
+        Ok(bytes.to_vec())
+    }
+
+    /// Where a track's stream is: the catalogue lossless master, else the
+    /// webPlayback AAC flavor for a track with no lossless master.
+    async fn locate(&self, track_id: &str) -> Result<Source, Reply> {
+        match catalogue::lossless_asset(&self.api, &self.catalogue, track_id).await {
+            Ok(master) => Ok(Source::Master(master)),
+            Err(PlaybackStage::CatalogueAsset) => {
+                catalogue::web_playback_aac(&self.api, &self.catalogue, track_id)
+                    .await
+                    .map_err(failed)
+            }
+            Err(stage) => Err(failed(stage)),
+        }
+    }
+
     async fn open_keys(&self, keys: Vec<KeyRequest>) -> Result<Result<(), usize>> {
-        let mut opened = self.fairplay.open_keys(keys.clone()).await;
+        let mut opened = self.open_keys_once(keys.clone()).await;
         for delay in KEY_RETRIES {
             let Ok(Err(refused)) = opened else { break };
             eprintln!("[play] key {refused} refused; retrying in {delay:?}");
             sleep(delay).await;
-            opened = self.fairplay.open_keys(keys.clone()).await;
+            opened = self.open_keys_once(keys.clone()).await;
         }
         opened
+    }
+
+    /// A key open that never returns means the fairplay thread is stuck in
+    /// Apple's code, where nothing can cancel it: a lock its own SVError left
+    /// held has done this. Only a new process recovers, and the daemon
+    /// restarts this one and restores the session (rule 6).
+    async fn open_keys_once(&self, keys: Vec<KeyRequest>) -> Result<Result<(), usize>> {
+        match timeout(KEY_OPEN_LIMIT, self.fairplay.open_keys(keys)).await {
+            Ok(opened) => opened,
+            Err(_) => {
+                eprintln!("[play] key open hung; restarting the provider");
+                std::process::exit(KEY_OPEN_HUNG);
+            }
+        }
     }
 
     async fn stream(
         &self,
         media: &Media,
+        keys: &Keys,
         output: Output,
         paused: bool,
         mut controls: mpsc::UnboundedReceiver<Control>,
@@ -217,7 +378,7 @@ impl Player {
             protections: [None; 2],
             key_ages: vec![None; media.segments.len()],
         });
-        let mut feed: Option<Feeding<'_>> = Some(Box::pin(self.feed(media, pipe, &seen)));
+        let mut feed: Option<Feeding<'_>> = Some(Box::pin(self.feed(media, keys, pipe, &seen)));
         let mut feed_fault = None;
         loop {
             tokio::select! {
@@ -265,6 +426,7 @@ impl Player {
     async fn feed(
         &self,
         media: &Media,
+        keys: &Keys,
         pipe: mpsc::Sender<Vec<u8>>,
         seen: &Seen,
     ) -> Result<(), PlaybackFault> {
@@ -274,7 +436,7 @@ impl Player {
         loop {
             let offset = boxes.resume_at();
             match self
-                .download(media, offset, &mut boxes, &mut clearer, &pipe, seen)
+                .download(media, keys, offset, &mut boxes, &mut clearer, &pipe, seen)
                 .await
             {
                 Err(fault) if resumable(fault) && retries < RETRIES => {
@@ -286,9 +448,11 @@ impl Player {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn download(
         &self,
         media: &Media,
+        keys: &Keys,
         offset: u64,
         boxes: &mut Boxes,
         clearer: &mut Clearer,
@@ -349,8 +513,24 @@ impl Player {
                         {
                             *slot = Some(fragment.shape);
                         }
-                        let key = media.segments[segment].key;
-                        let (fragment, key_age) = self.fairplay.decrypt(key, fragment).await?;
+                        let (fragment, key_age) = match keys {
+                            Keys::FairPlay => {
+                                let key = media.segments[segment].key;
+                                self.fairplay.decrypt(key, fragment).await?
+                            }
+                            Keys::Widevine { host, key_id } => {
+                                let mut fragment = fragment;
+                                host.lock()
+                                    .await
+                                    .decrypt(key_id, &mut fragment)
+                                    .await
+                                    .map_err(|err| {
+                                        eprintln!("[widevine] {err:#}");
+                                        PlaybackFault::Widevine
+                                    })?;
+                                (fragment, Duration::ZERO)
+                            }
+                        };
                         if let Ok(mut seen) = seen.lock()
                             && let Some(slot) = seen.key_ages.get_mut(segment)
                         {
@@ -545,7 +725,7 @@ impl Audio {
             .name("audio".into())
             .spawn(move || {
                 let result = (|| {
-                    let mut decoder = AlacDecoder::open_fragmented(source)?;
+                    let mut decoder = Decoder::open_fragmented(source)?;
                     let format = decoder.format();
                     if matches!(output, Output::Discard) {
                         while decoder.next_block()?.is_some() {}
